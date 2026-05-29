@@ -4,6 +4,7 @@
 //! overlays, tracking, behavior) is intended to live as external modular addons
 //! rather than being baked into the core.
 
+mod addon;
 mod app;
 mod camera;
 mod effects;
