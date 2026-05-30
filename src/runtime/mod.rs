@@ -108,6 +108,13 @@ impl PipelineRuntime {
         Ok(())
     }
 
+    /// Read-only access to the addon registry `build` validates against. The UI
+    /// uses this to list installed addons and resolve display names / param
+    /// schemas — it never mutates the registry or touches node internals.
+    pub fn registry(&self) -> &AddonRegistry {
+        &self.registry
+    }
+
     /// The engine hands the runtime the source texture view (the webcam). The
     /// view is stable for the program's life, so its bind group is built once.
     pub fn set_source(&mut self, device: &Device, view: &TextureView) {

@@ -13,6 +13,7 @@ mod camera;
 mod effects;
 mod engine;
 mod runtime;
+mod ui;
 
 use winit::event_loop::{ControlFlow, EventLoop};
 
