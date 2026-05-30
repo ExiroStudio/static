@@ -1,10 +1,9 @@
 //! Shader helpers for fullscreen passes.
 //!
 //! Composes the shared WGSL prelude (`common.wgsl`) in front of a fragment
-//! shader and builds a standard fullscreen-triangle pipeline. Used by the
-//! built-in DotRenderer; future addon passes can reuse the same helpers.
-
-pub mod ascii;
+//! shader and builds a standard fullscreen-triangle pipeline. Every pipeline
+//! addon (builtin or external) reuses these helpers — the engine itself no
+//! longer owns any specific look.
 
 use wgpu::*;
 
@@ -78,6 +77,23 @@ mod shader_tests {
 
     #[test]
     fn all_shaders_compile() {
+        // Addon fragment shaders, composed with the shared prelude.
         validate("ascii_dot", include_str!("../shaders/ascii_dot.wgsl"));
+        validate("crt", include_str!("../shaders/crt.wgsl"));
+    }
+
+    #[test]
+    fn blit_shader_compiles() {
+        // The sink's blit shader is standalone (no prelude).
+        let src = include_str!("../shaders/blit.wgsl");
+        let module = naga::front::wgsl::parse_str(src)
+            .unwrap_or_else(|e| panic!("[blit] WGSL parse error:\n{}", e.emit_to_string(src)));
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        validator
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("[blit] WGSL validation error: {e:?}"));
     }
 }

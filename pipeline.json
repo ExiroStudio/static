@@ -1,0 +1,20 @@
+{
+  "format_version": 1,
+  "name": "Default — surveillance dots",
+  "source": {
+    "type": "webcam"
+  },
+  "pipeline": [
+    {
+      "instance_id": "node-dot",
+      "addon": "dot-renderer"
+    },
+    {
+      "instance_id": "node-crt",
+      "addon": "crt"
+    }
+  ],
+  "sink": {
+    "type": "window"
+  }
+}

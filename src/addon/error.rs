@@ -42,6 +42,23 @@ pub enum AddonError {
     #[error("invalid pipeline config: {0}")]
     InvalidPipeline(String),
 
+    /// A pipeline was structurally valid but failed validation against the
+    /// registry (missing addons, bad params). Carries the rendered issue list.
+    #[error("pipeline rejected:\n{0}")]
+    PipelineRejected(String),
+
+    /// An addon is installed (manifest present) but the runtime has no factory
+    /// registered to instantiate it. In v1 every addon is builtin, so this only
+    /// fires for a pipeline that references something the host can't construct.
+    #[error("addon {0:?} has no runtime implementation registered")]
+    NoImplementation(String),
+
+    #[error("unsupported source type {0:?}")]
+    UnsupportedSource(String),
+
+    #[error("unsupported sink type {0:?}")]
+    UnsupportedSink(String),
+
     #[error("package format error: {0}")]
     Package(String),
 

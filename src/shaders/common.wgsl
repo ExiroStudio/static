@@ -1,21 +1,26 @@
 // common.wgsl
-// Prepended to every fragment shader by `effects::make_module`. Declares the
-// shared bind group interface, the fullscreen-triangle vertex stage, and small
-// helpers. WGSL has no `#include`, so we compose at pipeline-build time.
+// Shared prelude prepended to every addon fragment shader by
+// `effects::make_module`. WGSL has no `#include`, so we compose at
+// pipeline-build time.
+//
+// Bind group contract every pipeline addon sees:
+//
+//   @group(0) host context   — resolution + time, owned by the runtime.
+//   @group(1) frame input    — the texture produced by the previous node
+//                              (or the source for the first node).
+//   @group(2) addon params    — declared by each addon's own shader, filled
+//                              from its manifest params. The prelude does NOT
+//                              declare it; addons are independent.
 
-// --- @group(0): the engine's small uniform block -------------------------
-struct Globals {
+// --- @group(0): host context, identical for every node -------------------
+struct Host {
     resolution: vec2<f32>,
-    cell_size: f32,
-    dot_softness: f32,
-    contrast: f32,
-    exposure: f32,
-    glow: f32,
-    mirror: f32,
+    time: f32,
+    _pad: f32,
 };
-@group(0) @binding(0) var<uniform> G: Globals;
+@group(0) @binding(0) var<uniform> H: Host;
 
-// --- @group(1): the image input (the webcam) -----------------------------
+// --- @group(1): the frame input (previous node's output / the source) ----
 @group(1) @binding(0) var input_tex: texture_2d<f32>;
 @group(1) @binding(1) var input_sampler: sampler;
 
@@ -40,4 +45,8 @@ fn luma(c: vec3<f32>) -> f32 {
 
 fn sample_luma(uv: vec2<f32>) -> f32 {
     return luma(textureSample(input_tex, input_sampler, uv).rgb);
+}
+
+fn sample_rgb(uv: vec2<f32>) -> vec3<f32> {
+    return textureSample(input_tex, input_sampler, uv).rgb;
 }

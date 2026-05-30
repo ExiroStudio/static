@@ -1,14 +1,18 @@
 //! Static — a minimal modular realtime signal runtime.
 //!
-//! Core pipeline: webcam → DotRenderer → present. Everything else (effects,
-//! overlays, tracking, behavior) is intended to live as external modular addons
-//! rather than being baked into the core.
+//! The render chain is not hardcoded: it is loaded from `pipeline.json` and
+//! executed by the [`runtime`] as `source → pipeline nodes → sink`. The
+//! DotRenderer and CRT looks are builtin *addons* registered through the addon
+//! ecosystem; the runtime executes them through one shared interface and
+//! special-cases none of them. New looks arrive as addons, not engine edits.
 
 mod addon;
+mod addons;
 mod app;
 mod camera;
 mod effects;
 mod engine;
+mod runtime;
 
 use winit::event_loop::{ControlFlow, EventLoop};
 

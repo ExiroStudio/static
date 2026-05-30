@@ -21,10 +21,16 @@ use super::manifest::Manifest;
 
 /// One successfully registered addon.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // `root`/`builtin` are informational metadata for a future UI
 pub struct AddonEntry {
     pub manifest: Manifest,
     /// Absolute path to the addon directory (the one containing `manifest.toml`).
+    /// Empty for builtin addons, which have no on-disk presence.
     pub root: PathBuf,
+    /// Whether this addon ships inside the engine binary rather than on disk.
+    /// The registry treats builtin and external addons identically once
+    /// registered; this is purely informational (e.g. for a future UI).
+    pub builtin: bool,
 }
 
 /// An addon directory that failed to load or validate. Kept so the UI can
@@ -99,6 +105,28 @@ impl AddonRegistry {
             AddonEntry {
                 manifest,
                 root: root.to_owned(),
+                builtin: false,
+            },
+        );
+        Ok(())
+    }
+
+    /// Register an addon that ships inside the engine binary. The manifest is
+    /// validated and compatibility-checked exactly like a scanned one, so the
+    /// rest of the system (pipeline validation, params, UI) cannot tell a
+    /// builtin from an external addon.
+    pub fn register_builtin(&mut self, manifest: Manifest) -> Result<()> {
+        manifest.validate()?;
+        check_compat(&manifest, self.engine_api)?;
+        if self.entries.contains_key(&manifest.id) {
+            return Err(AddonError::DuplicateAddon(manifest.id.clone()));
+        }
+        self.entries.insert(
+            manifest.id.clone(),
+            AddonEntry {
+                manifest,
+                root: PathBuf::new(),
+                builtin: true,
             },
         );
         Ok(())
