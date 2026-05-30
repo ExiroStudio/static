@@ -7,28 +7,28 @@
   },
   "pipeline": [
     {
-      "instance_id": "node-dot",
-      "addon": "dot-renderer",
-      "enabled": true,
-      "config": {
-        "cell_size": 7.5,
-        "contrast": 1.4,
-        "dot_softness": 0.12,
-        "exposure": 1.1,
-        "mirror": true
-      }
-    },
-    {
       "instance_id": "node-crt",
       "addon": "crt",
       "enabled": true,
       "config": {
-        "aperture": 0.47000000000000003,
+        "aperture": 0.47,
         "brightness": 1.1,
         "curvature": 0.6000000000000001,
         "persistence": 0.51,
-        "scanline": 0.47000000000000003,
+        "scanline": 0.47,
         "vignette": 0.61
+      }
+    },
+    {
+      "instance_id": "node-dot",
+      "addon": "dot-renderer",
+      "enabled": true,
+      "config": {
+        "cell_size": 9.0,
+        "contrast": 0.9,
+        "dot_softness": 0.12,
+        "exposure": 1.1,
+        "mirror": true
       }
     }
   ],

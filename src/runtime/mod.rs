@@ -21,11 +21,13 @@ pub mod sink;
 pub mod targets;
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use wgpu::*;
 
+use crate::addon::manifest::Manifest;
 use crate::addon::pipeline::PipelineConfig;
-use crate::addon::registry::AddonRegistry;
+use crate::addon::registry::{AddonEntry, AddonRegistry};
 use crate::addon::{AddonError, Result};
 use crate::engine::image::ImageBinding;
 
@@ -46,6 +48,9 @@ pub const SINK_WINDOW: &str = "window";
 pub struct PipelineRuntime {
     registry: AddonRegistry,
     factories: HashMap<String, NodeFactory>,
+    /// Manifests of the builtin addons, kept so a registry rescan (after an
+    /// install/uninstall) can re-register them alongside the on-disk addons.
+    builtin_manifests: Vec<Manifest>,
 
     // Host-owned GPU resources, shared by every node.
     host: HostUniform,
@@ -83,6 +88,7 @@ impl PipelineRuntime {
         Self {
             registry: AddonRegistry::new(),
             factories: HashMap::new(),
+            builtin_manifests: Vec::new(),
             host,
             image,
             format,
@@ -103,9 +109,35 @@ impl PipelineRuntime {
     pub fn register_builtin<A: BuiltinAddon>(&mut self) -> Result<()> {
         let manifest = A::manifest();
         let id = manifest.id.clone();
+        self.builtin_manifests.push(manifest.clone());
         self.registry.register_builtin(manifest)?;
         self.factories.insert(id, A::instantiate as NodeFactory);
         Ok(())
+    }
+
+    /// Scan an addons directory for on-disk addons, in addition to whatever is
+    /// already registered (builtins). Missing directory → no-op. Used at
+    /// startup to pick up installed addons.
+    pub fn scan_addons(&mut self, root: &Path) -> Result<()> {
+        self.registry.scan(root)
+    }
+
+    /// Rebuild the registry from scratch after an install/uninstall: re-register
+    /// the builtins, then rescan the addons directory. The live node list is
+    /// untouched (a separate `build` applies any resulting changes).
+    pub fn rescan_addons(&mut self, root: &Path) -> Result<()> {
+        self.registry.clear();
+        for manifest in &self.builtin_manifests {
+            self.registry.register_builtin(manifest.clone())?;
+        }
+        self.registry.scan(root)
+    }
+
+    /// Whether the runtime has a factory able to instantiate `addon_id`. An
+    /// installed addon without an implementation (e.g. a future external addon)
+    /// can be listed but not run.
+    pub fn has_implementation(&self, addon_id: &str) -> bool {
+        self.factories.contains_key(addon_id)
     }
 
     /// Read-only access to the addon registry `build` validates against. The UI
@@ -156,22 +188,69 @@ impl PipelineRuntime {
                 .registry
                 .get(&node.addon)
                 .expect("validate_against guarantees the addon is installed");
-            let factory = self
-                .factories
-                .get(&node.addon)
-                .ok_or_else(|| AddonError::NoImplementation(node.addon.clone()))?;
             let resolved = ResolvedConfig::new(&entry.manifest.params, &node.config);
-            nodes.push(factory(
-                device,
-                &self.host.layout,
-                &self.image.layout,
-                self.format,
-                &resolved,
-            ));
+
+            let instance = match self.factories.get(&node.addon) {
+                // A compiled-in addon (builtin) supplies its own factory.
+                Some(factory) => factory(
+                    device,
+                    &self.host.layout,
+                    &self.image.layout,
+                    self.format,
+                    &resolved,
+                ),
+                // Otherwise fall back to the generic external-shader runner,
+                // which loads the addon's declared WGSL off disk.
+                None => self.build_external(device, entry, &resolved)?,
+            };
+            nodes.push(instance);
         }
 
         self.nodes = nodes;
         Ok(())
+    }
+
+    /// Generic runner for an external addon (no compiled factory): load the
+    /// addon's declared fragment shader off disk and pack its numeric schema
+    /// params into the `@group(2)` uniform. An addon with no shader genuinely
+    /// has nothing to run → [`AddonError::NoImplementation`].
+    fn build_external(
+        &self,
+        device: &Device,
+        entry: &AddonEntry,
+        resolved: &ResolvedConfig,
+    ) -> Result<Box<dyn PipelineNode>> {
+        let shader = entry
+            .manifest
+            .shaders
+            .iter()
+            .find(|s| s.stage == "fragment")
+            .or_else(|| entry.manifest.shaders.first())
+            .ok_or_else(|| AddonError::NoImplementation(entry.manifest.id.clone()))?;
+
+        let path = entry.root.join(&shader.path);
+        let src = std::fs::read_to_string(&path).map_err(|e| {
+            AddonError::Package(format!("failed to read shader {:?}: {e}", shader.path))
+        })?;
+
+        // Numeric params packed in sorted-key order (BTreeMap iterates sorted),
+        // matching the convention the addon's `@group(2)` struct must follow.
+        let params: Vec<f32> = entry
+            .manifest
+            .params
+            .keys()
+            .map(|k| resolved.f32(k))
+            .collect();
+
+        Ok(crate::addons::external_shader_node(
+            device,
+            &self.host.layout,
+            &self.image.layout,
+            self.format,
+            &entry.manifest.id,
+            &src,
+            &params,
+        ))
     }
 
     /// Recreate the ping-pong targets at a new surface size. The instantiated

@@ -27,3 +27,7 @@ nanoid = "0.4"
 # project's winit 0.30. The winit→egui input bridge is hand-rolled in ui::input.
 egui = "0.28"
 egui-wgpu = "0.28"
+
+# Addon install: plain ZIP packages (no custom extension) + native file picker.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+rfd = "0.14"

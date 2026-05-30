@@ -81,6 +81,23 @@ impl ApplicationHandler for App {
                 }
             }
 
+            // Drag a .zip addon package onto the window to install it.
+            WindowEvent::DroppedFile(path) => {
+                let is_zip = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+                if is_zip {
+                    if let (Some(engine), Some(ui)) = (self.engine.as_mut(), self.ui.as_mut()) {
+                        ui.state.notice = Some(match engine.install_addon(&path) {
+                            Ok(msg) => (false, msg),
+                            Err(msg) => (true, msg),
+                        });
+                        ui.state.open = true; // reveal the workspace so the result is visible
+                    }
+                }
+            }
+
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -139,6 +156,21 @@ impl App {
 
         engine.tick_reload();
         ui.build(engine);
+
+        // The "Install from ZIP…" button defers the native picker to here, so
+        // the dialog never runs nested inside the egui pass.
+        if std::mem::take(&mut ui.state.want_install_picker) {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Addon package", &["zip"])
+                .pick_file()
+            {
+                ui.state.notice = Some(match engine.install_addon(&path) {
+                    Ok(msg) => (false, msg),
+                    Err(msg) => (true, msg),
+                });
+            }
+        }
+
         engine.render_with_overlay(camera, |device, queue, view, size| {
             ui.paint(device, queue, view, size);
         });

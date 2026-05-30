@@ -83,6 +83,20 @@ mod shader_tests {
     }
 
     #[test]
+    fn external_glitch_monitor_shader_compiles() {
+        // The first external addon's shader must be valid WGSL when composed
+        // with the engine prelude — proving the generic external-shader runner
+        // can load and run it. Read at runtime (not `include_str!`) so a clean
+        // checkout without the example sources still builds; skip if absent.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/glitch-monitor/shaders/glitch.wgsl");
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        validate("glitch", &src);
+    }
+
+    #[test]
     fn blit_shader_compiles() {
         // The sink's blit shader is standalone (no prelude).
         let src = include_str!("../shaders/blit.wgsl");

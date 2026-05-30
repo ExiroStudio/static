@@ -1,3 +1,6 @@
 /target
 .claude
 /docs
+/addons
+# Built addon packages (regenerable from examples/<addon>/)
+/examples

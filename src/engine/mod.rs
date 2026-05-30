@@ -27,6 +27,7 @@ use std::time::Instant;
 use wgpu::*;
 use winit::window::Window;
 
+use crate::addon::package;
 use crate::addon::pipeline::{PipelineConfig, SinkConfig, SourceConfig};
 use crate::addon::registry::AddonRegistry;
 use crate::addon::schema::ParamValue;
@@ -41,6 +42,9 @@ use video::VideoTexture;
 /// Where the engine looks for the pipeline definition, relative to the working
 /// directory. Missing or invalid → the built-in default pipeline is used.
 const PIPELINE_PATH: &str = "pipeline.json";
+
+/// Directory holding installed (on-disk) addons, one subdirectory per addon id.
+const ADDONS_ROOT: &str = "addons";
 
 pub struct Engine {
     gpu: GpuContext,
@@ -86,6 +90,11 @@ impl Engine {
 
         // The webcam is the source; hand its view to the runtime.
         runtime.set_source(&gpu.device, &video.view);
+
+        // Pick up any on-disk addons installed under `addons/` (missing → no-op).
+        if let Err(e) = runtime.scan_addons(Path::new(ADDONS_ROOT)) {
+            eprintln!("[engine] addon scan failed: {e}");
+        }
 
         // Load the pipeline definition, validate it against the registry, and
         // build the runtime pipeline — all before the first frame renders.
@@ -154,6 +163,76 @@ impl Engine {
     pub fn set_enabled(&mut self, instance_id: &str, enabled: bool) {
         if self.config.set_enabled(instance_id, enabled) {
             self.reload.mark_dirty_now();
+        }
+    }
+
+    /// Append an addon to the pipeline. Returns the new node's `instance_id`.
+    pub fn add_node(&mut self, addon_id: &str) -> String {
+        let instance_id = self.config.add_node(addon_id, None);
+        self.reload.mark_dirty_now();
+        instance_id
+    }
+
+    /// Remove a node from the pipeline (does not touch the addon on disk).
+    pub fn remove_node(&mut self, instance_id: &str) {
+        if self.config.remove_node(instance_id) {
+            self.reload.mark_dirty_now();
+        }
+    }
+
+    /// Move a node to position `to` (reorder). Preserves the node's id + config.
+    pub fn move_node(&mut self, instance_id: &str, to: usize) {
+        if self.config.move_node(instance_id, to) {
+            self.reload.mark_dirty_now();
+        }
+    }
+
+    /// Whether the runtime can actually run `addon_id` (has an implementation).
+    /// Installed-but-not-runnable addons are listed but can't render.
+    pub fn is_runnable(&self, addon_id: &str) -> bool {
+        self.runtime.has_implementation(addon_id)
+    }
+
+    /// Whether `addon_id` is referenced by any node in the current pipeline.
+    pub fn addon_in_use(&self, addon_id: &str) -> bool {
+        self.config.pipeline.iter().any(|n| n.addon == addon_id)
+    }
+
+    /// Install an addon from a ZIP package: extract, validate, rescan the
+    /// registry, schedule a rebuild. Returns a user-facing message on either
+    /// outcome (the live pipeline keeps running regardless).
+    pub fn install_addon(&mut self, zip_path: &Path) -> std::result::Result<String, String> {
+        match self.try_install(zip_path) {
+            Ok(id) => Ok(format!("Installed “{id}”.")),
+            Err(e) => Err(reload::humanize(&e)),
+        }
+    }
+
+    fn try_install(&mut self, zip_path: &Path) -> crate::addon::Result<String> {
+        let installed = package::install(zip_path, Path::new(ADDONS_ROOT))?;
+        self.runtime.rescan_addons(Path::new(ADDONS_ROOT))?;
+        // Registry changed; re-validate / rebuild (pipeline itself is unchanged).
+        self.reload.mark_dirty_now();
+        let id = installed
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("addon")
+            .to_string();
+        Ok(id)
+    }
+
+    /// Uninstall an addon: first remove any pipeline nodes using it (so the
+    /// pipeline never silently breaks), then delete its directory and rescan.
+    pub fn uninstall_addon(&mut self, addon_id: &str) -> std::result::Result<String, String> {
+        self.config.pipeline.retain(|n| n.addon != addon_id);
+        match package::uninstall(Path::new(ADDONS_ROOT), addon_id)
+            .and_then(|()| self.runtime.rescan_addons(Path::new(ADDONS_ROOT)))
+        {
+            Ok(()) => {
+                self.reload.mark_dirty_now();
+                Ok(format!("Uninstalled “{addon_id}”."))
+            }
+            Err(e) => Err(reload::humanize(&e)),
         }
     }
 
