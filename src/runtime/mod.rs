@@ -11,7 +11,7 @@
 //! [`AddonRegistry`], instantiates it through the addon's own factory, and
 //! executes the nodes in order, passing a [`FrameContext`] between them via two
 //! ping-pong GPU targets. It special-cases nothing: builtin and (future)
-//! external addons run through the identical [`PipelineNode`] interface. There
+//! external addons run through the identical [`FilterNode`] interface. There
 //! is no graph compilation, no dependency resolution, no scheduler — just
 //! sequential execution.
 
@@ -32,12 +32,14 @@ use crate::addon::{AddonError, Result};
 use crate::engine::image::ImageBinding;
 
 pub use context::{
-    params_bind_group, params_layout, BuiltinAddon, FrameContext, NodeFactory, PipelineNode,
+    params_bind_group, params_layout, BuiltinAddon, FilterNode, FrameContext, NodeFactory,
     ResolvedConfig,
 };
 use host::HostUniform;
 use sink::WindowSink;
 use targets::RenderTarget;
+
+use crate::signal::SignalSnapshot;
 
 /// The source kind v1 ships. Sources are engine-shipped, not addons; the engine
 /// owns the webcam texture and hands its view to the runtime.
@@ -68,7 +70,11 @@ pub struct PipelineRuntime {
     sink: WindowSink,
 
     /// The live, instantiated pipeline. Empty until [`build`](Self::build).
-    nodes: Vec<Box<dyn PipelineNode>>,
+    nodes: Vec<Box<dyn FilterNode>>,
+
+    /// Number of successful pipeline (re)builds. Used by the spike to assert
+    /// that signal-driven updates never trigger a rebuild.
+    build_count: u64,
 }
 
 impl PipelineRuntime {
@@ -98,6 +104,7 @@ impl PipelineRuntime {
             bg_source: None,
             sink,
             nodes: Vec::new(),
+            build_count: 0,
         }
     }
 
@@ -179,7 +186,7 @@ impl PipelineRuntime {
         }
 
         // Instantiate each enabled node through its addon's own factory.
-        let mut nodes: Vec<Box<dyn PipelineNode>> = Vec::new();
+        let mut nodes: Vec<Box<dyn FilterNode>> = Vec::new();
         for node in &config.pipeline {
             if !node.enabled {
                 continue;
@@ -207,7 +214,14 @@ impl PipelineRuntime {
         }
 
         self.nodes = nodes;
+        self.build_count += 1;
         Ok(())
+    }
+
+    /// Number of successful pipeline (re)builds since start. Constant while only
+    /// signals change — the spike's core invariant.
+    pub fn build_count(&self) -> u64 {
+        self.build_count
     }
 
     /// Generic runner for an external addon (no compiled factory): load the
@@ -219,7 +233,7 @@ impl PipelineRuntime {
         device: &Device,
         entry: &AddonEntry,
         resolved: &ResolvedConfig,
-    ) -> Result<Box<dyn PipelineNode>> {
+    ) -> Result<Box<dyn FilterNode>> {
         let shader = entry
             .manifest
             .shaders
@@ -273,8 +287,23 @@ impl PipelineRuntime {
     /// Node `i` reads the source (i == 0) or the previous node's target, and
     /// writes target `i & 1`; the sink blits the final target. With an empty
     /// pipeline the source is blitted straight through.
-    pub fn render(&self, device: &Device, queue: &Queue, surface_view: &TextureView, time: f32) {
+    pub fn render(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        surface_view: &TextureView,
+        time: f32,
+        signals: &SignalSnapshot,
+    ) {
         self.host.upload(queue, self.size, time);
+
+        // Signal-binding pass: each node folds the latest snapshot into its own
+        // per-frame uniforms via `queue.write_buffer`. No rebuild, no new bind
+        // groups, no pipeline recompilation — just bytes uploaded to existing
+        // buffers. Nodes that consume nothing do nothing here.
+        for node in self.nodes.iter_mut() {
+            node.prepare(queue, signals);
+        }
 
         let source_bg = self
             .bg_source

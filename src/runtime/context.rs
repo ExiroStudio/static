@@ -1,6 +1,6 @@
 //! The runtime↔addon execution contract.
 //!
-//! A pipeline addon is anything that implements [`PipelineNode`]: it receives a
+//! A filter addon is anything that implements [`FilterNode`]: it receives a
 //! [`FrameContext`], records GPU work that reads the frame input and writes the
 //! frame output, and returns. It does not know its neighbours, its position in
 //! the pipeline, or the source/sink on either end.
@@ -15,6 +15,7 @@ use wgpu::*;
 
 use crate::addon::manifest::Manifest;
 use crate::addon::schema::{ParamMap, ParamSpec, ParamValue};
+use crate::signal::SignalSnapshot;
 
 /// Everything a node needs to record one frame's worth of work.
 ///
@@ -31,10 +32,21 @@ pub struct FrameContext<'a> {
     pub output: &'a TextureView,
 }
 
-/// A live, instantiated pipeline node. The runtime holds these as
-/// `Box<dyn PipelineNode>` and executes them in order, identically — there is
+/// A live, instantiated filter node. The runtime holds these as
+/// `Box<dyn FilterNode>` and executes them in order, identically — there is
 /// no per-addon branching anywhere in the executor.
-pub trait PipelineNode {
+///
+/// Each frame the runtime calls [`prepare`](FilterNode::prepare) once (to fold
+/// the latest [`SignalSnapshot`] into the node's per-frame uniforms via
+/// `queue.write_buffer`), then [`process`](FilterNode::process) (to record the
+/// render pass). Nodes that consume no signals keep the default no-op `prepare`.
+pub trait FilterNode {
+    /// Refresh per-frame GPU state from the latest signals. Default no-op.
+    /// This must only *update* existing resources (e.g. `write_buffer`); it
+    /// must never recreate bind groups, pipelines, or rebuild the runtime.
+    fn prepare(&mut self, _queue: &Queue, _signals: &SignalSnapshot) {}
+
+    /// Record this node's render pass.
     fn process(&self, ctx: &mut FrameContext);
 }
 
@@ -54,7 +66,7 @@ pub trait BuiltinAddon {
         image_layout: &BindGroupLayout,
         format: TextureFormat,
         config: &ResolvedConfig,
-    ) -> Box<dyn PipelineNode>;
+    ) -> Box<dyn FilterNode>;
 }
 
 /// Function-pointer form of [`BuiltinAddon::instantiate`], stored per addon id.
@@ -64,7 +76,7 @@ pub type NodeFactory = fn(
     &BindGroupLayout,
     TextureFormat,
     &ResolvedConfig,
-) -> Box<dyn PipelineNode>;
+) -> Box<dyn FilterNode>;
 
 /// A node's configuration with manifest defaults filled in. Validation has
 /// already run by the time an addon sees this, so the typed accessors fall back

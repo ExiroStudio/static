@@ -9,7 +9,7 @@
 //! ```
 //!
 //! The UI never touches the runtime, the registry internals, or any node type
-//! ([`PipelineNode`](crate::runtime::PipelineNode), `FrameContext`, …). It edits
+//! ([`FilterNode`](crate::runtime::FilterNode), `FrameContext`, …). It edits
 //! the config through the thin API on this struct (`set_param`, `set_enabled`,
 //! …) and reads it back through [`config`](Engine::config) /
 //! [`registry`](Engine::registry). Edits are applied to the running pipeline by
@@ -32,8 +32,10 @@ use crate::addon::pipeline::{PipelineConfig, SinkConfig, SourceConfig};
 use crate::addon::registry::AddonRegistry;
 use crate::addon::schema::ParamValue;
 use crate::addons::{CrtAddon, DotRendererAddon};
+use crate::behavior::BehaviorRuntime;
 use crate::camera::WebcamCapture;
 use crate::runtime::{PipelineRuntime, SINK_WINDOW, SOURCE_WEBCAM};
+use crate::signal::SignalBus;
 
 use gpu::GpuContext;
 use reload::ReloadState;
@@ -62,8 +64,19 @@ pub struct Engine {
     last_good: PipelineConfig,
     reload: ReloadState,
 
+    /// The signal bus: behaviors publish, filters consume. Shared with the
+    /// behavior thread.
+    bus: Arc<SignalBus>,
+    /// The behavior thread. Held for its lifetime; dropping it stops + joins.
+    _behavior: BehaviorRuntime,
+
     frame_buf: Vec<u8>,
     start: Instant,
+
+    // ---- spike metrics (logged once per second) ----
+    frames: u32,
+    last_stat: Instant,
+    last_pubs: u64,
 }
 
 impl Engine {
@@ -103,6 +116,11 @@ impl Engine {
             .build(&gpu.device, &config)
             .expect("failed to build pipeline from pipeline.json");
 
+        // Signal bus + behavior thread. The behavior thread publishes
+        // `signal.time`; the CRT filter consumes it. They share only the bus.
+        let bus = Arc::new(SignalBus::new());
+        let behavior = BehaviorRuntime::spawn(bus.clone());
+
         Self {
             gpu,
             video,
@@ -110,8 +128,13 @@ impl Engine {
             last_good: config.clone(),
             config,
             reload: ReloadState::new(),
+            bus,
+            _behavior: behavior,
             frame_buf: Vec::new(),
             start: Instant::now(),
+            frames: 0,
+            last_stat: Instant::now(),
+            last_pubs: 0,
         }
     }
 
@@ -284,9 +307,14 @@ impl Engine {
         };
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
 
+        // One immutable snapshot of the bus per frame; every node reads from it.
+        let signals = self.bus.snapshot();
+
         let time = self.start.elapsed().as_secs_f32();
         self.runtime
-            .render(&self.gpu.device, &self.gpu.queue, &view, time); // encoder #1 (submits)
+            .render(&self.gpu.device, &self.gpu.queue, &view, time, &signals); // encoder #1 (submits)
+
+        self.log_stats(&signals);
 
         overlay(
             &self.gpu.device,
@@ -296,6 +324,28 @@ impl Engine {
         ); // encoder #2 (egui), same surface frame
 
         frame.present();
+    }
+
+    /// Spike instrumentation: once per second, report FPS, rebuild count, signal
+    /// publish frequency, and the current `signal.time`. The invariant to watch
+    /// is `builds` staying constant while `signal.time` oscillates.
+    fn log_stats(&mut self, signals: &crate::signal::SignalSnapshot) {
+        self.frames += 1;
+        let dt = self.last_stat.elapsed().as_secs_f32();
+        if dt < 1.0 {
+            return;
+        }
+        let fps = self.frames as f32 / dt;
+        let pubs = self.bus.published_count();
+        let signal_hz = (pubs - self.last_pubs) as f32 / dt;
+        let builds = self.runtime.build_count();
+        let t = signals.get("signal.time").unwrap_or(0.0);
+        eprintln!(
+            "[spike] fps={fps:.1} builds={builds} signal_hz={signal_hz:.0} signal.time={t:+.3}"
+        );
+        self.frames = 0;
+        self.last_pubs = pubs;
+        self.last_stat = Instant::now();
     }
 }
 

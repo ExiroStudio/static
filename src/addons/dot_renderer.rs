@@ -2,14 +2,14 @@
 //!
 //! Luminance → dot matrix. It used to be hardcoded into the engine; it now
 //! registers through the addon system and runs through the same
-//! [`PipelineNode`] interface as every other addon. The runtime does not know
+//! [`FilterNode`] interface as every other addon. The runtime does not know
 //! it exists by name.
 
 use wgpu::*;
 
 use super::{base_manifest, bool_param, build_shader_node, f32_param};
 use crate::addon::manifest::Manifest;
-use crate::runtime::{BuiltinAddon, PipelineNode, ResolvedConfig};
+use crate::runtime::{BuiltinAddon, FilterNode, ResolvedConfig};
 
 /// `@group(2)` params block — mirrors `DotParams` in `ascii_dot.wgsl`
 /// (8 × f32 = 32 bytes, 16-byte aligned).
@@ -59,7 +59,7 @@ impl BuiltinAddon for DotRendererAddon {
         image_layout: &BindGroupLayout,
         format: TextureFormat,
         config: &ResolvedConfig,
-    ) -> Box<dyn PipelineNode> {
+    ) -> Box<dyn FilterNode> {
         let params = DotParams {
             cell_size: config.f32("cell_size"),
             dot_softness: config.f32("dot_softness"),

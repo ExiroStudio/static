@@ -9,10 +9,12 @@
 mod addon;
 mod addons;
 mod app;
+mod behavior;
 mod camera;
 mod effects;
 mod engine;
 mod runtime;
+mod signal;
 mod ui;
 
 use winit::event_loop::{ControlFlow, EventLoop};

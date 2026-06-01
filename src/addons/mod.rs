@@ -1,13 +1,13 @@
 //! Builtin addons — addons that ship inside the engine binary.
 //!
 //! Each lives in its own file, declares its [`Manifest`] in code, and builds a
-//! [`PipelineNode`] from resolved config. They are registered through
+//! [`FilterNode`] from resolved config. They are registered through
 //! [`PipelineRuntime::register_builtin`](crate::runtime::PipelineRuntime::register_builtin)
 //! and from then on are indistinguishable from external addons — the runtime
 //! never names them.
 //!
 //! [`Manifest`]: crate::addon::manifest::Manifest
-//! [`PipelineNode`]: crate::runtime::PipelineNode
+//! [`FilterNode`]: crate::runtime::FilterNode
 
 mod crt;
 mod dot_renderer;
@@ -23,7 +23,46 @@ use wgpu::*;
 use crate::addon::manifest::{AddonKind, Manifest, CURRENT_MANIFEST_VERSION};
 use crate::addon::schema::{ParamSpec, UiHints};
 use crate::effects::{fullscreen_pipeline, make_module};
-use crate::runtime::{params_bind_group, params_layout, FrameContext, PipelineNode};
+use crate::runtime::{params_bind_group, params_layout, FilterNode, FrameContext};
+
+/// Record one fullscreen pass: bind `[host, input, params]` and draw the
+/// fullscreen triangle into `output`. Shared by every node shape so the render
+/// recording lives in one place.
+pub(super) fn record_fullscreen_pass(
+    ctx: &mut FrameContext,
+    pipeline: &RenderPipeline,
+    params_bg: &BindGroup,
+    label: &str,
+) {
+    let mut pass = ctx.encoder.begin_render_pass(&RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(RenderPassColorAttachment {
+            view: ctx.output,
+            resolve_target: None,
+            ops: Operations {
+                load: LoadOp::Clear(Color::BLACK),
+                store: StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        occlusion_query_set: None,
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, ctx.host_bg, &[]); // host context
+    pass.set_bind_group(1, ctx.input_bg, &[]); // frame input
+    pass.set_bind_group(2, params_bg, &[]); // addon params
+    pass.draw(0..3, 0..1);
+}
+
+/// The GPU pieces of a single fullscreen shader pass: the pipeline plus the
+/// `@group(2)` params buffer and its bind group. Returned to addons that need
+/// to keep the buffer to update it per frame (signal consumers).
+pub(super) struct ShaderPass {
+    pub pipeline: RenderPipeline,
+    pub params_bg: BindGroup,
+    pub params_buf: Buffer,
+}
 
 /// The shared shape of a builtin addon node: one fullscreen pass with a params
 /// uniform at `@group(2)`. DotRenderer and CRT differ only in their shader and
@@ -36,27 +75,9 @@ struct ShaderNode {
     _params_buf: Buffer,
 }
 
-impl PipelineNode for ShaderNode {
+impl FilterNode for ShaderNode {
     fn process(&self, ctx: &mut FrameContext) {
-        let mut pass = ctx.encoder.begin_render_pass(&RenderPassDescriptor {
-            label: Some(self.label.as_str()),
-            color_attachments: &[Some(RenderPassColorAttachment {
-                view: ctx.output,
-                resolve_target: None,
-                ops: Operations {
-                    load: LoadOp::Clear(Color::BLACK),
-                    store: StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            occlusion_query_set: None,
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, ctx.host_bg, &[]); // host context
-        pass.set_bind_group(1, ctx.input_bg, &[]); // frame input
-        pass.set_bind_group(2, &self.params_bg, &[]); // addon params
-        pass.draw(0..3, 0..1);
+        record_fullscreen_pass(ctx, &self.pipeline, &self.params_bg, self.label.as_str());
     }
 }
 
@@ -70,7 +91,7 @@ fn build_shader_node<P: bytemuck::Pod>(
     label: &'static str,
     shader_src: &str,
     params: P,
-) -> Box<dyn PipelineNode> {
+) -> Box<dyn FilterNode> {
     build_shader_node_bytes(
         device,
         host_layout,
@@ -82,9 +103,11 @@ fn build_shader_node<P: bytemuck::Pod>(
     )
 }
 
-/// Core node builder: upload `params_bytes` to a `@group(2)` uniform, compose
-/// `shader_src` with the shared prelude, and bind `[host, image, params]`.
-fn build_shader_node_bytes(
+/// Build the GPU pieces of a fullscreen shader pass: upload `params_bytes` to a
+/// `@group(2)` uniform, compose `shader_src` with the shared prelude, and build
+/// the pipeline bound as `[host, image, params]`. The params buffer is returned
+/// so signal-consuming addons can update it each frame.
+pub(super) fn build_shader_pass(
     device: &Device,
     host_layout: &BindGroupLayout,
     image_layout: &BindGroupLayout,
@@ -92,7 +115,7 @@ fn build_shader_node_bytes(
     label: &str,
     shader_src: &str,
     params_bytes: &[u8],
-) -> Box<dyn PipelineNode> {
+) -> ShaderPass {
     let params_buf = device.create_buffer_init(&util::BufferInitDescriptor {
         label: Some(label),
         contents: params_bytes,
@@ -110,11 +133,38 @@ fn build_shader_node_bytes(
         format,
     );
 
-    Box::new(ShaderNode {
-        label: label.to_string(),
+    ShaderPass {
         pipeline,
         params_bg,
-        _params_buf: params_buf,
+        params_buf,
+    }
+}
+
+/// Core node builder for nodes with no per-frame updates: wraps a
+/// [`build_shader_pass`] result in a plain [`ShaderNode`].
+fn build_shader_node_bytes(
+    device: &Device,
+    host_layout: &BindGroupLayout,
+    image_layout: &BindGroupLayout,
+    format: TextureFormat,
+    label: &str,
+    shader_src: &str,
+    params_bytes: &[u8],
+) -> Box<dyn FilterNode> {
+    let pass = build_shader_pass(
+        device,
+        host_layout,
+        image_layout,
+        format,
+        label,
+        shader_src,
+        params_bytes,
+    );
+    Box::new(ShaderNode {
+        label: label.to_string(),
+        pipeline: pass.pipeline,
+        params_bg: pass.params_bg,
+        _params_buf: pass.params_buf,
     })
 }
 
@@ -134,7 +184,7 @@ pub fn external_shader_node(
     label: &str,
     shader_src: &str,
     params: &[f32],
-) -> Box<dyn PipelineNode> {
+) -> Box<dyn FilterNode> {
     // Pad to a multiple of 4 floats (16 bytes) so the uniform satisfies WGSL's
     // alignment rules; never zero-length.
     let mut floats = params.to_vec();
