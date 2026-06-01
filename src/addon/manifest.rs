@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{AddonError, Result};
 use super::schema::ParamSpec;
+use crate::signal::{SignalRef, SignalSpec};
 
 pub const MANIFEST_FILENAME: &str = "manifest.toml";
 
@@ -55,6 +56,14 @@ pub struct Manifest {
     pub assets: Vec<AssetDecl>,
     #[serde(default)]
     pub params: BTreeMap<String, ParamSpec>,
+
+    // ---- signals ----
+    /// Signals this addon publishes (behaviors).
+    #[serde(default)]
+    pub publish: Vec<SignalSpec>,
+    /// Signals this addon consumes (filters).
+    #[serde(default)]
+    pub consume: Vec<SignalRef>,
 }
 
 /// What kind of addon this is. Pipeline (filter) addons run on the render

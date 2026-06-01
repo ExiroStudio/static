@@ -15,6 +15,8 @@ use crate::camera::FrameSource;
 use crate::runtime::ResolvedConfig;
 use crate::signal::{SignalPublisher, SignalSchema};
 
+type Schema = Arc<SignalSchema>;
+
 use super::node::{BehaviorCtx, BehaviorStartCtx, FrameView, Timing};
 use super::{BehaviorCommand, BehaviorInit, BehaviorStatsShared};
 
@@ -50,7 +52,7 @@ impl Slot {
 pub(super) struct BehaviorScheduler {
     slots: Vec<Slot>,
     publisher: SignalPublisher,
-    schema: SignalSchema,
+    schema: Schema,
     frame: FrameSource,
     frame_buf: Vec<u8>,
     stats: Arc<BehaviorStatsShared>,
@@ -65,7 +67,7 @@ pub(super) struct BehaviorScheduler {
 impl BehaviorScheduler {
     pub(super) fn new(
         publisher: SignalPublisher,
-        schema: SignalSchema,
+        schema: Schema,
         frame: FrameSource,
         initial: Vec<BehaviorInit>,
         stats: Arc<BehaviorStatsShared>,
@@ -122,7 +124,7 @@ impl BehaviorScheduler {
     }
 
     fn start_all(&mut self) {
-        let schema = self.schema;
+        let schema = self.schema.clone();
         for slot in self.slots.iter_mut() {
             if !slot.started {
                 let config = ResolvedConfig::new(&slot.specs, &slot.values);
@@ -195,9 +197,18 @@ impl BehaviorScheduler {
 
     fn apply(&mut self, cmd: BehaviorCommand) {
         match cmd {
-            BehaviorCommand::Reload(inits) => {
+            BehaviorCommand::Reload {
+                publisher,
+                schema,
+                behaviors,
+            } => {
+                // A structural reload swaps in the new store endpoint and schema
+                // (the render thread recreated them) along with the new set.
                 self.stop_all();
-                self.slots = inits.into_iter().map(Slot::from_init).collect();
+                self.publisher = publisher;
+                self.schema = schema;
+                self.slots = behaviors.into_iter().map(Slot::from_init).collect();
+                self.frame_buf.clear();
                 self.start_all();
             }
             BehaviorCommand::SetParam {
@@ -227,7 +238,7 @@ impl BehaviorScheduler {
 mod tests {
     use super::*;
     use crate::addon::schema::{ParamValue, UiHints};
-    use crate::signal::{SignalId, SignalReader, SignalStore, SignalValue};
+    use crate::signal::{SignalId, SignalKind, SignalReader, SignalStore, SignalValue};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     // ---- a probe behavior that records lifecycle calls and publishes a
@@ -293,6 +304,7 @@ mod tests {
         let init = BehaviorInit {
             instance_id: id.to_string(),
             node: Box::new(node),
+            publish: vec![],
             specs,
             values,
             enabled: true,
@@ -300,8 +312,12 @@ mod tests {
         (init, Handles { started, stopped, updates })
     }
 
+    fn test_schema() -> Arc<SignalSchema> {
+        Arc::new(SignalSchema::from_pairs(&[("signal.time", SignalKind::F32)]))
+    }
+
     fn make(initial: Vec<BehaviorInit>) -> (BehaviorScheduler, SignalReader) {
-        let schema = SignalSchema::standard();
+        let schema = test_schema();
         let (publisher, reader) = SignalStore::new(&schema);
         let stats = Arc::new(BehaviorStatsShared::default());
         let sched = BehaviorScheduler::new(publisher, schema, FrameSource::empty(), initial, stats);
@@ -311,7 +327,7 @@ mod tests {
     fn read_time(reader: &mut SignalReader) -> f32 {
         let mut snap = reader.snapshot();
         reader.snapshot_into(&mut snap);
-        let id = SignalSchema::standard().id("signal.time").unwrap();
+        let id = test_schema().id("signal.time").unwrap();
         snap.get(id).as_f32().unwrap()
     }
 
@@ -364,16 +380,28 @@ mod tests {
     #[test]
     fn reload_stops_old_and_starts_new() {
         let (init_a, a) = probe_init("a", 1.0, false);
-        let (mut sched, mut reader) = make(vec![init_a]);
+        let (mut sched, _reader_a) = make(vec![init_a]);
         sched.start_all();
 
+        // A structural reload hands the thread a fresh store endpoint + schema
+        // + set (mirrors what the engine does on rebuild).
+        let schema = test_schema();
+        let (publisher_b, mut reader_b) = SignalStore::new(&schema);
         let (init_b, b) = probe_init("b", 2.0, false);
-        sched.apply(BehaviorCommand::Reload(vec![init_b]));
+        sched.apply(BehaviorCommand::Reload {
+            publisher: publisher_b,
+            schema,
+            behaviors: vec![init_b],
+        });
         assert!(a.stopped.load(Ordering::Relaxed), "reload must stop the old set");
         assert!(b.started.load(Ordering::Relaxed), "reload must start the new set");
 
         sched.tick();
-        assert_eq!(read_time(&mut reader), 2.0, "new behavior publishes after reload");
+        assert_eq!(
+            read_time(&mut reader_b),
+            2.0,
+            "new behavior publishes into the new store after reload"
+        );
         assert_eq!(b.updates.load(Ordering::Relaxed), 1);
     }
 

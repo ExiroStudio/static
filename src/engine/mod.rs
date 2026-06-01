@@ -22,7 +22,7 @@ pub mod video;
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use wgpu::*;
 use winit::window::Window;
@@ -32,10 +32,12 @@ use crate::addon::pipeline::{PipelineConfig, SinkConfig, SourceConfig};
 use crate::addon::registry::AddonRegistry;
 use crate::addon::schema::ParamValue;
 use crate::addons::{CrtAddon, DotRendererAddon};
-use crate::behavior::{builtins, BehaviorHandle, BehaviorRuntime};
+use crate::behavior::{builtins, BehaviorHandle, BehaviorInit, BehaviorRuntime};
 use crate::camera::{FrameSource, WebcamCapture};
 use crate::runtime::{PipelineRuntime, SINK_WINDOW, SOURCE_WEBCAM};
-use crate::signal::{SignalReader, SignalSchema, SignalSnapshot, SignalStore};
+use crate::signal::{
+    SchemaError, SignalReader, SignalSchema, SignalSchemaBuilder, SignalSnapshot, SignalStore,
+};
 
 use gpu::GpuContext;
 use reload::ReloadState;
@@ -64,24 +66,48 @@ pub struct Engine {
     last_good: PipelineConfig,
     reload: ReloadState,
 
-    /// The signal schema (static `standard()` for now). Owned by the engine and
-    /// shared with the behavior thread.
-    schema: SignalSchema,
+    /// The signal schema for the current build (publishers ∪ consumers). Owned
+    /// by the render thread; an `Arc` clone is shared with the behavior thread.
+    schema: Arc<SignalSchema>,
     /// The consumer end of the signal store; the producer end lives on the
     /// behavior thread. Read once per frame into `signals`.
     reader: SignalReader,
-    /// The reusable per-frame snapshot buffer (allocated once).
+    /// The reusable per-frame snapshot buffer (re-allocated only when the schema
+    /// changes).
     signals: SignalSnapshot,
     /// Control handle for the behavior thread. Dropping it stops + joins.
     behavior: BehaviorHandle,
+    /// Wall time of the last structural rebuild (diagnostics).
+    last_reload_ms: f32,
+    /// Total `@group(3)` uniform bytes across the live filters (diagnostics).
+    group3_bytes: usize,
 
     frame_buf: Vec<u8>,
     start: Instant,
 
-    // ---- spike metrics (logged once per second) ----
+    // ---- metrics (sampled once per second; exposed via `stats()`) ----
     frames: u32,
     last_stat: Instant,
     last_pubs: u64,
+    cur_fps: f32,
+    cur_signal_hz: f32,
+    /// Pending debounced config save for hot (non-rebuild) behavior edits.
+    save_at: Option<Instant>,
+}
+
+/// Debounce for persisting hot behavior edits (matches the reload debounce).
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(120);
+
+/// A snapshot of live engine + behavior metrics (for the UI / diagnostics).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EngineStats {
+    pub fps: f32,
+    pub build_count: u64,
+    pub signal_hz: f32,
+    pub behavior_hz: f32,
+    pub behavior_update_us: f32,
+    pub reload_ms: f32,
+    pub group3_bytes: usize,
 }
 
 impl Engine {
@@ -110,6 +136,11 @@ impl Engine {
         runtime
             .register_builtin::<CrtAddon>()
             .expect("register crt");
+        // Behavior addons are registered as manifests only (no filter factory);
+        // the behavior runtime constructs them.
+        runtime
+            .register_behavior(builtins::time::manifest())
+            .expect("register time behavior");
 
         // The webcam is the source; hand its view to the runtime.
         runtime.set_source(&gpu.device, &video.view);
@@ -119,19 +150,26 @@ impl Engine {
             eprintln!("[engine] addon scan failed: {e}");
         }
 
-        // Load the pipeline definition, validate it against the registry, and
-        // build the runtime pipeline — all before the first frame renders.
         let config = load_pipeline_config();
+
+        // Build the schema from the config's behaviors (publish) + filters
+        // (consume), then the store + filters — all before the first frame.
+        let inits = build_behavior_inits(&config);
+        let (schema, warnings) = build_schema(&inits, &config, runtime.registry())
+            .expect("initial pipeline schema is invalid");
+        for w in &warnings {
+            eprintln!("[engine] {w}");
+        }
         runtime
-            .build(&gpu.device, &config)
+            .build(&gpu.device, &config, &schema)
             .expect("failed to build pipeline from pipeline.json");
 
-        // Signal store + behavior thread. The behavior thread publishes
-        // `signal.time`; the CRT filter consumes it. They share only the store.
-        let schema = SignalSchema::standard();
+        // Signal store + behavior thread. The behavior thread publishes;
+        // the filters consume. They share only the store.
         let (publisher, reader) = SignalStore::new(&schema);
         let signals = reader.snapshot();
-        let behavior = BehaviorRuntime::spawn(publisher, schema, frame, vec![builtins::time::init()]);
+        let group3_bytes = group3_bytes(&config, runtime.registry());
+        let behavior = BehaviorRuntime::spawn(publisher, schema.clone(), frame, inits);
 
         Self {
             gpu,
@@ -144,11 +182,16 @@ impl Engine {
             reader,
             signals,
             behavior,
+            last_reload_ms: 0.0,
+            group3_bytes,
             frame_buf: Vec::new(),
             start: Instant::now(),
             frames: 0,
             last_stat: Instant::now(),
             last_pubs: 0,
+            cur_fps: 0.0,
+            cur_signal_hz: 0.0,
+            save_at: None,
         }
     }
 
@@ -273,26 +316,132 @@ impl Engine {
         }
     }
 
-    /// Apply the working config to the running pipeline once edits have settled.
-    /// On success the new config becomes the running one and is persisted; on
-    /// failure the previous pipeline keeps running and the error is surfaced.
+    /// Apply the working config once edits have settled. On success the new
+    /// config becomes the running one and is persisted; on failure the previous
+    /// build keeps running and the error is surfaced. The render thread never
+    /// waits on the behavior thread — its reload is fire-and-forget.
     pub fn tick_reload(&mut self) {
-        if !self.reload.take_if_settled() {
-            return;
-        }
-        match self.runtime.build(&self.gpu.device, &self.config) {
-            Ok(()) => {
-                self.last_good = self.config.clone();
-                self.reload.set_error(None);
-                if let Err(e) = self.last_good.save(Path::new(PIPELINE_PATH)) {
-                    self.reload
-                        .set_error(Some(format!("Applied, but couldn't save: {e}")));
+        if self.reload.take_if_settled() {
+            let t0 = Instant::now();
+            match self.rebuild() {
+                Ok(()) => {
+                    self.last_reload_ms = t0.elapsed().as_secs_f32() * 1000.0;
+                    self.reload.set_error(None);
+                    self.persist();
+                }
+                Err(e) => {
+                    // Nothing was swapped; the live build is still `last_good`.
+                    self.reload.set_error(Some(e));
                 }
             }
-            Err(e) => {
-                // The live pipeline is still `last_good`; just report.
-                self.reload.set_error(Some(reload::humanize(&e)));
-            }
+        }
+        // Persist hot (non-rebuild) behavior edits once they settle.
+        if matches!(self.save_at, Some(t) if t.elapsed() >= SAVE_DEBOUNCE) {
+            self.save_at = None;
+            self.persist();
+        }
+    }
+
+    /// Persist the working config and remember it as the last-good one.
+    fn persist(&mut self) {
+        self.last_good = self.config.clone();
+        if let Err(e) = self.last_good.save(Path::new(PIPELINE_PATH)) {
+            self.reload
+                .set_error(Some(format!("Applied, but couldn't save: {e}")));
+        }
+    }
+
+    /// Build schema → filters from the working config. The signal store and
+    /// behavior thread are only re-created when the schema's *signals* change
+    /// (i.e. a behavior was added/removed) — filter edits and behavior
+    /// enable/param edits leave them running. On any error nothing is swapped.
+    fn rebuild(&mut self) -> std::result::Result<(), String> {
+        let inits = build_behavior_inits(&self.config);
+        let (schema, warnings) =
+            build_schema(&inits, &self.config, self.runtime.registry()).map_err(|e| e.to_string())?;
+        for w in &warnings {
+            eprintln!("[engine] {w}");
+        }
+        let schema_changed = schema.as_ref() != self.schema.as_ref();
+
+        // Build filters against whichever schema will be live; on failure keep
+        // the live build (any new store endpoints are simply dropped).
+        if schema_changed {
+            let (publisher, reader) = SignalStore::new(&schema);
+            self.runtime
+                .build(&self.gpu.device, &self.config, &schema)
+                .map_err(|e| reload::humanize(&e))?;
+            // Success → swap render-side state, async-reload the behavior thread.
+            self.schema = schema.clone();
+            self.reader = reader;
+            self.signals = self.reader.snapshot();
+            self.behavior.reload(publisher, schema, inits);
+        } else {
+            self.runtime
+                .build(&self.gpu.device, &self.config, &self.schema)
+                .map_err(|e| reload::humanize(&e))?;
+        }
+        self.group3_bytes = group3_bytes(&self.config, self.runtime.registry());
+        Ok(())
+    }
+
+    // ---- UI-facing behavior edit API (unordered set) ----
+
+    /// Add a behavior addon to the set. Returns the new instance id.
+    pub fn add_behavior(&mut self, addon_id: &str) -> String {
+        let id = self.config.add_behavior(addon_id);
+        self.reload.mark_dirty_now();
+        id
+    }
+
+    pub fn remove_behavior(&mut self, instance_id: &str) {
+        // Removing a behavior changes the published-signal set → structural.
+        if self.config.remove_behavior(instance_id) {
+            self.reload.mark_dirty_now();
+        }
+    }
+
+    /// Enable/disable a behavior. Hot: the schema is unchanged (every behavior's
+    /// signals stay declared), so this is a live command, not a rebuild.
+    pub fn set_behavior_enabled(&mut self, instance_id: &str, enabled: bool) {
+        if self.config.set_behavior_enabled(instance_id, enabled) {
+            self.behavior.set_enabled(instance_id, enabled);
+            self.save_at = Some(Instant::now());
+        }
+    }
+
+    /// Set a behavior parameter. Hot: applied live via a command, persisted on
+    /// a debounce — no rebuild, no behavior re-create.
+    pub fn set_behavior_param(&mut self, instance_id: &str, key: &str, value: ParamValue) {
+        if self.config.set_behavior_param(instance_id, key, value.clone()) {
+            self.behavior.set_param(instance_id, key, value);
+            self.save_at = Some(Instant::now());
+        }
+    }
+
+    // ---- UI-facing signal inspection (read-only) ----
+
+    /// The live signal schema (names/kinds/ids) for the inspector.
+    pub fn signal_schema(&self) -> &SignalSchema {
+        &self.schema
+    }
+
+    /// The latest per-frame signal snapshot for the inspector.
+    pub fn signal_snapshot(&self) -> &SignalSnapshot {
+        &self.signals
+    }
+
+    /// A snapshot of the live engine + behavior metrics.
+    pub fn stats(&self) -> EngineStats {
+        let b = self.behavior.stats();
+        EngineStats {
+            fps: self.cur_fps,
+            build_count: self.runtime.build_count(),
+            signal_hz: self.cur_signal_hz,
+            behavior_hz: b.fps,
+            behavior_update_us: b.last_update_us,
+            reload_ms: self.last_reload_ms,
+            group3_bytes: self.group3_bytes,
         }
     }
 
@@ -349,21 +498,27 @@ impl Engine {
         if dt < 1.0 {
             return;
         }
-        let fps = self.frames as f32 / dt;
         let pubs = self.reader.published();
-        let signal_hz = (pubs - self.last_pubs) as f32 / dt;
-        let builds = self.runtime.build_count();
-        let t = self
-            .schema
-            .id("signal.time")
-            .and_then(|id| self.signals.get(id).as_f32())
-            .unwrap_or(0.0);
-        let b = self.behavior.stats();
-        eprintln!(
-            "[spike] fps={fps:.1} builds={builds} signal_hz={signal_hz:.0} signal.time={t:+.3} \
-             | behavior {:.0}Hz update={:.0}us over_budget={}",
-            b.fps, b.last_update_us, b.over_budget
-        );
+        self.cur_fps = self.frames as f32 / dt;
+        self.cur_signal_hz = (pubs - self.last_pubs) as f32 / dt;
+
+        // Diagnostics print is debug-only — release builds carry no logging I/O.
+        #[cfg(debug_assertions)]
+        {
+            let s = self.stats();
+            let t = self
+                .schema
+                .id("signal.time")
+                .and_then(|id| self.signals.get(id).as_f32())
+                .unwrap_or(0.0);
+            eprintln!(
+                "[stats] fps={:.1} builds={} signal_hz={:.0} signal.time={t:+.3} | \
+                 behavior {:.0}Hz update={:.0}us reload={:.1}ms group3={}B",
+                s.fps, s.build_count, s.signal_hz, s.behavior_hz, s.behavior_update_us,
+                s.reload_ms, s.group3_bytes
+            );
+        }
+
         self.frames = 0;
         self.last_pubs = pubs;
         self.last_stat = Instant::now();
@@ -389,7 +544,8 @@ fn load_pipeline_config() -> PipelineConfig {
     default_pipeline()
 }
 
-/// The default pipeline: webcam → dot-renderer → crt → window.
+/// The default pipeline: webcam → dot-renderer → crt → window, with the `time`
+/// behavior publishing `signal.time` (which CRT consumes).
 fn default_pipeline() -> PipelineConfig {
     let mut config = PipelineConfig::new(
         SourceConfig {
@@ -403,5 +559,58 @@ fn default_pipeline() -> PipelineConfig {
     );
     config.add_node("dot-renderer", None);
     config.add_node("crt", None);
+    config.add_behavior("time");
     config
+}
+
+/// Build the runnable behavior instances from the config's `behaviors` list.
+/// Unknown behavior addons are skipped with a warning.
+fn build_behavior_inits(config: &PipelineConfig) -> Vec<BehaviorInit> {
+    config
+        .behaviors
+        .iter()
+        .filter_map(|node| match node.addon.as_str() {
+            "time" => Some(builtins::time::init_with(
+                node.instance_id.clone(),
+                node.config.clone(),
+                node.enabled,
+            )),
+            other => {
+                eprintln!("[engine] unknown behavior addon {other:?} — skipped");
+                None
+            }
+        })
+        .collect()
+}
+
+/// Build the signal schema: every behavior's published signals (so the schema
+/// is stable across enable/disable), validated against the enabled filters'
+/// consumed signals.
+fn build_schema(
+    inits: &[BehaviorInit],
+    config: &PipelineConfig,
+    registry: &AddonRegistry,
+) -> std::result::Result<(Arc<SignalSchema>, Vec<String>), SchemaError> {
+    let mut builder = SignalSchemaBuilder::new();
+    for init in inits {
+        builder.publish_all(&init.publish)?;
+    }
+    for node in config.pipeline.iter().filter(|n| n.enabled) {
+        if let Some(entry) = registry.get(&node.addon) {
+            builder.validate_consumer(&entry.manifest.consume)?;
+        }
+    }
+    Ok(builder.finish())
+}
+
+/// Total `@group(3)` uniform bytes across the enabled filters (16 per consumed
+/// signal) — a diagnostics metric.
+fn group3_bytes(config: &PipelineConfig, registry: &AddonRegistry) -> usize {
+    config
+        .pipeline
+        .iter()
+        .filter(|n| n.enabled)
+        .filter_map(|n| registry.get(&n.addon))
+        .map(|e| e.manifest.consume.len() * 16)
+        .sum()
 }

@@ -77,7 +77,7 @@ impl SignalStore {
             store: store.clone(),
             write_idx: 0,
             working: schema.default_frame(),
-            schema: *schema,
+            schema: schema.clone(),
         };
         let reader = SignalReader { store, read_idx: 1 };
         (publisher, reader)
@@ -185,13 +185,23 @@ impl SignalSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signal::SignalKind;
     use std::sync::atomic::AtomicBool;
     use std::thread;
     use std::time::Instant;
 
+    /// A small built schema for the store tests (replaces the old static one).
+    fn schema() -> SignalSchema {
+        SignalSchema::from_pairs(&[
+            ("signal.time", SignalKind::F32),
+            ("face.position", SignalKind::Vec3),
+            ("face.rotation", SignalKind::Vec4),
+        ])
+    }
+
     #[test]
     fn publish_then_snapshot_roundtrips() {
-        let schema = SignalSchema::standard();
+        let schema = schema();
         let (mut pubr, mut rdr) = SignalStore::new(&schema);
         let id = schema.id("signal.time").unwrap();
         let mut snap = rdr.snapshot();
@@ -208,7 +218,7 @@ mod tests {
 
     #[test]
     fn signal_ids_are_stable_and_distinct() {
-        let s = SignalSchema::standard();
+        let s = schema();
         let a = s.id("face.position").unwrap();
         let b = s.id("face.position").unwrap();
         assert_eq!(a, b, "id resolution must be stable");
@@ -227,7 +237,7 @@ mod tests {
     /// consistent (this also exercises the publish/snapshot race).
     #[test]
     fn multi_signal_snapshot_is_never_torn() {
-        let schema = SignalSchema::standard();
+        let schema = schema();
         let pos = schema.id("face.position").unwrap();
         let rot = schema.id("face.rotation").unwrap();
         let (mut pubr, mut rdr) = SignalStore::new(&schema);
@@ -264,7 +274,7 @@ mod tests {
     /// The hot path must not allocate: the reused snapshot buffer never moves.
     #[test]
     fn snapshot_buffer_is_never_reallocated() {
-        let schema = SignalSchema::standard();
+        let schema = schema();
         let (mut pubr, mut rdr) = SignalStore::new(&schema);
         let id = schema.id("signal.time").unwrap();
         let mut snap = rdr.snapshot();
@@ -283,7 +293,7 @@ mod tests {
     #[test]
     #[ignore]
     fn bench_signal_path() {
-        let schema = SignalSchema::standard();
+        let schema = schema();
         let (mut pubr, mut rdr) = SignalStore::new(&schema);
         let id = schema.id("signal.time").unwrap();
         let mut snap = rdr.snapshot();

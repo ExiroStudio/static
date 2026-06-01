@@ -17,6 +17,14 @@ struct CrtParams {
 };
 @group(2) @binding(0) var<uniform> P: CrtParams;
 
+// @group(3): dynamic bindings. binding(0) is the consumed-signals uniform —
+// one vec4 per consumed signal, in manifest `consume` order. CRT consumes
+// `signal.time` (slot 0); .x carries sin(elapsed) in [-1, 1].
+struct Signals {
+    v: array<vec4<f32>, 1>,
+};
+@group(3) @binding(0) var<uniform> S: Signals;
+
 // Barrel-distort UV around the screen centre.
 fn barrel(uv: vec2<f32>, amt: f32) -> vec2<f32> {
     let c = uv - vec2<f32>(0.5);
@@ -59,8 +67,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let vig = 1.0 - P.vignette * dot(c, c) * 2.0;
     l = l * clamp(vig, 0.0, 1.0);
 
+    // Brightness modulated by the consumed signal: base ± amplitude·signal.time.
+    let brightness = P.brightness + S.v[0].x * 0.8;
+
     // Faint phosphor-green tint — near-monochrome surveillance monitor.
-    l = clamp(l * P.brightness, 0.0, 1.0);
+    l = clamp(l * brightness, 0.0, 1.0);
     let tint = vec3<f32>(0.85, 1.0, 0.87);
     return vec4<f32>(l * tint, 1.0);
 }

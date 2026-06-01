@@ -4,17 +4,24 @@
 //! source frame (CPU only) and publishes signals. It cannot reach the GPU, a
 //! queue, a texture, the runtime, or `build()` — the context types simply do
 //! not expose them, so misuse is unrepresentable rather than merely discouraged.
+//!
+//! The context exposes the full contract surface — `frame`, `publish`, `config`,
+//! `timing`. The one builtin behavior (`time`) only uses `timing`, so the
+//! frame/config accessors are `#[allow(dead_code)]` here; frame-consuming
+//! behaviors (Phase 3) exercise the rest.
 
 use crate::runtime::ResolvedConfig;
 use crate::signal::{SignalId, SignalPublisher, SignalSchema, SignalValue};
 
 /// A read-only, CPU-side view of the latest source frame. No GPU handles.
+#[allow(dead_code)] // contract surface for frame-consuming behaviors (Phase 3)
 pub struct FrameView<'a> {
     width: u32,
     height: u32,
     rgba: &'a [u8],
 }
 
+#[allow(dead_code)] // accessors used by frame-consuming behaviors (Phase 3)
 impl<'a> FrameView<'a> {
     pub(crate) fn new(width: u32, height: u32, rgba: &'a [u8]) -> Self {
         Self {
@@ -40,6 +47,7 @@ impl<'a> FrameView<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct Timing {
     /// Seconds since the previous tick.
+    #[allow(dead_code)] // contract surface; `time` uses only `elapsed`
     pub dt: f32,
     /// Seconds since the runtime started.
     pub elapsed: f32,
@@ -62,6 +70,7 @@ impl<'a> BehaviorStartCtx<'a> {
         self.schema
     }
 
+    #[allow(dead_code)] // contract surface; `time` resolves only via `schema`
     pub fn config(&self) -> &ResolvedConfig<'a> {
         &self.config
     }
@@ -91,6 +100,7 @@ impl<'a> BehaviorCtx<'a> {
     }
 
     /// The latest source frame, if one has been captured.
+    #[allow(dead_code)] // contract surface for frame-consuming behaviors (Phase 3)
     pub fn frame(&self) -> Option<&FrameView<'a>> {
         self.frame.as_ref()
     }
@@ -101,6 +111,7 @@ impl<'a> BehaviorCtx<'a> {
         self.publisher.set(id, value);
     }
 
+    #[allow(dead_code)] // contract surface; `time` uses only `timing`
     pub fn config(&self) -> &ResolvedConfig<'a> {
         &self.config
     }

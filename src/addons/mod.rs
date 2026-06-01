@@ -32,6 +32,7 @@ pub(super) fn record_fullscreen_pass(
     ctx: &mut FrameContext,
     pipeline: &RenderPipeline,
     params_bg: &BindGroup,
+    signals_bg: Option<&BindGroup>,
     label: &str,
 ) {
     let mut pass = ctx.encoder.begin_render_pass(&RenderPassDescriptor {
@@ -52,6 +53,9 @@ pub(super) fn record_fullscreen_pass(
     pass.set_bind_group(0, ctx.host_bg, &[]); // host context
     pass.set_bind_group(1, ctx.input_bg, &[]); // frame input
     pass.set_bind_group(2, params_bg, &[]); // addon params
+    if let Some(bg) = signals_bg {
+        pass.set_bind_group(3, bg, &[]); // dynamic bindings (signals)
+    }
     pass.draw(0..3, 0..1);
 }
 
@@ -77,7 +81,7 @@ struct ShaderNode {
 
 impl FilterNode for ShaderNode {
     fn process(&self, ctx: &mut FrameContext) {
-        record_fullscreen_pass(ctx, &self.pipeline, &self.params_bg, self.label.as_str());
+        record_fullscreen_pass(ctx, &self.pipeline, &self.params_bg, None, self.label.as_str());
     }
 }
 
@@ -115,6 +119,7 @@ pub(super) fn build_shader_pass(
     label: &str,
     shader_src: &str,
     params_bytes: &[u8],
+    extra_layouts: &[&BindGroupLayout],
 ) -> ShaderPass {
     let params_buf = device.create_buffer_init(&util::BufferInitDescriptor {
         label: Some(label),
@@ -124,14 +129,12 @@ pub(super) fn build_shader_pass(
     let plyt = params_layout(device, label);
     let params_bg = params_bind_group(device, &plyt, &params_buf);
 
+    // Bind group layouts: [host, image, params, <extra (e.g. group3)>].
+    let mut layouts: Vec<&BindGroupLayout> = vec![host_layout, image_layout, &plyt];
+    layouts.extend_from_slice(extra_layouts);
+
     let module = make_module(device, label, shader_src);
-    let pipeline = fullscreen_pipeline(
-        device,
-        label,
-        &module,
-        &[host_layout, image_layout, &plyt],
-        format,
-    );
+    let pipeline = fullscreen_pipeline(device, label, &module, &layouts, format);
 
     ShaderPass {
         pipeline,
@@ -159,6 +162,7 @@ fn build_shader_node_bytes(
         label,
         shader_src,
         params_bytes,
+        &[],
     );
     Box::new(ShaderNode {
         label: label.to_string(),
@@ -223,6 +227,8 @@ fn base_manifest(id: &str, name: &str, description: &str) -> Manifest {
         shaders: vec![],
         assets: vec![],
         params: BTreeMap::new(),
+        publish: vec![],
+        consume: vec![],
     }
 }
 

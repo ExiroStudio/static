@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use crate::addon::schema::{ParamMap, ParamSpec, ParamValue};
 use crate::camera::FrameSource;
-use crate::signal::{SignalPublisher, SignalSchema};
+use crate::signal::{SignalPublisher, SignalSchema, SignalSpec};
 
 pub use node::BehaviorNode;
 
@@ -34,6 +34,8 @@ use scheduler::BehaviorScheduler;
 pub struct BehaviorInit {
     pub instance_id: String,
     pub node: Box<dyn BehaviorNode>,
+    /// Signals this behavior publishes (feeds the schema builder).
+    pub publish: Vec<SignalSpec>,
     /// Manifest param specs (supply defaults for `ResolvedConfig`).
     pub specs: BTreeMap<String, ParamSpec>,
     /// Current config values; `SetParam` mutates these in place.
@@ -44,8 +46,14 @@ pub struct BehaviorInit {
 /// Control messages sent to the behavior thread. All are applied at the top of
 /// a tick, never mid-update.
 pub enum BehaviorCommand {
-    /// Replace the entire behavior set (stop old, start new).
-    Reload(Vec<BehaviorInit>),
+    /// Structural reload: the render thread rebuilt the schema + store, so the
+    /// behavior thread takes the new producer endpoint, the new schema, and the
+    /// new behavior set together (stop old, start new).
+    Reload {
+        publisher: SignalPublisher,
+        schema: Arc<SignalSchema>,
+        behaviors: Vec<BehaviorInit>,
+    },
     /// Hot config update — does not recreate the instance or its resources.
     SetParam {
         instance_id: String,
@@ -67,7 +75,7 @@ impl BehaviorRuntime {
     /// behavior *set* changes (via [`BehaviorCommand::Reload`]).
     pub fn spawn(
         publisher: SignalPublisher,
-        schema: SignalSchema,
+        schema: Arc<SignalSchema>,
         frame: FrameSource,
         initial: Vec<BehaviorInit>,
     ) -> BehaviorHandle {
@@ -106,9 +114,19 @@ pub struct BehaviorHandle {
 }
 
 impl BehaviorHandle {
-    /// Replace the behavior set asynchronously. Returns immediately.
-    pub fn reload(&self, inits: Vec<BehaviorInit>) {
-        let _ = self.tx.send(BehaviorCommand::Reload(inits));
+    /// Hand the behavior thread a new store endpoint, schema, and behavior set
+    /// (a structural reload). Returns immediately; the render thread never waits.
+    pub fn reload(
+        &self,
+        publisher: SignalPublisher,
+        schema: Arc<SignalSchema>,
+        behaviors: Vec<BehaviorInit>,
+    ) {
+        let _ = self.tx.send(BehaviorCommand::Reload {
+            publisher,
+            schema,
+            behaviors,
+        });
     }
 
     pub fn set_param(&self, instance_id: &str, key: &str, value: ParamValue) {
@@ -152,8 +170,10 @@ pub struct BehaviorStats {
     /// Wall time of the last tick's `update` pass, in microseconds.
     pub last_update_us: f32,
     /// Total publishes since start.
+    #[allow(dead_code)] // surfaced to tests/inspector; not in the render-loop log
     pub published: u64,
     /// Number of ticks whose update pass exceeded the 8ms budget.
+    #[allow(dead_code)] // surfaced to tests/inspector; not in the render-loop log
     pub over_budget: u64,
 }
 
@@ -195,20 +215,20 @@ impl BehaviorStatsShared {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signal::{SignalSchema, SignalStore};
+    use crate::signal::{SignalKind, SignalSchema, SignalStore};
 
     /// End-to-end thread lifecycle: spawn → real publishing → drop joins
     /// cleanly (no hang). The deterministic per-tick behavior is covered by the
     /// scheduler unit tests.
     #[test]
     fn spawn_publishes_then_shuts_down_cleanly() {
-        let schema = SignalSchema::standard();
+        let schema = Arc::new(SignalSchema::from_pairs(&[("signal.time", SignalKind::F32)]));
         let (publisher, reader) = SignalStore::new(&schema);
         let handle = BehaviorRuntime::spawn(
             publisher,
             schema,
             FrameSource::empty(),
-            vec![builtins::time::init()],
+            vec![builtins::time::init_with("time".into(), Default::default(), true)],
         );
 
         // Bounded wait for the 30Hz thread to publish at least once.

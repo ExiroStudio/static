@@ -9,10 +9,18 @@ use crate::addon::manifest::{AddonKind, Manifest, CURRENT_MANIFEST_VERSION};
 use crate::addon::schema::ParamMap;
 use crate::behavior::node::{BehaviorCtx, BehaviorNode, BehaviorStartCtx};
 use crate::behavior::BehaviorInit;
-use crate::signal::{SignalId, SignalValue};
+use crate::signal::{SignalId, SignalKind, SignalSpec, SignalValue};
 
 /// The signal this behavior produces.
 const TIME_SIGNAL: &str = "signal.time";
+
+/// What this behavior publishes — fed to the schema builder.
+fn published() -> Vec<SignalSpec> {
+    vec![SignalSpec {
+        name: TIME_SIGNAL.into(),
+        kind: SignalKind::F32,
+    }]
+}
 
 #[derive(Default)]
 pub struct TimeBehavior {
@@ -58,19 +66,24 @@ pub fn manifest() -> Manifest {
         shaders: vec![],
         assets: vec![],
         params: BTreeMap::new(),
+        publish: published(),
+        consume: vec![],
     }
 }
 
-/// Construct the runnable behavior instance the engine seeds the runtime with.
-pub fn init() -> BehaviorInit {
+/// Construct a runnable behavior instance with the given instance id and config
+/// values. The engine seeds and reloads the runtime with these.
+pub fn init_with(instance_id: String, values: ParamMap, enabled: bool) -> BehaviorInit {
     BehaviorInit {
-        instance_id: "time".into(),
+        instance_id,
         node: Box::new(TimeBehavior::default()),
+        publish: published(),
         specs: BTreeMap::new(),
-        values: ParamMap::new(),
-        enabled: true,
+        values,
+        enabled,
     }
 }
+
 
 #[cfg(test)]
 mod tests {
