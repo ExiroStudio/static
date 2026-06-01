@@ -57,12 +57,14 @@ pub struct Manifest {
     pub params: BTreeMap<String, ParamSpec>,
 }
 
-/// What kind of addon this is. v1 only loads pipeline-node addons; sources
-/// and sinks are engine-shipped and not pluggable through the addon ecosystem.
+/// What kind of addon this is. Pipeline (filter) addons run on the render
+/// thread; behavior addons are producers that run on the behavior thread and
+/// only publish signals. Sources and sinks remain engine-shipped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AddonKind {
     Pipeline,
+    Behavior,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

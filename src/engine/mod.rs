@@ -32,8 +32,8 @@ use crate::addon::pipeline::{PipelineConfig, SinkConfig, SourceConfig};
 use crate::addon::registry::AddonRegistry;
 use crate::addon::schema::ParamValue;
 use crate::addons::{CrtAddon, DotRendererAddon};
-use crate::behavior::BehaviorRuntime;
-use crate::camera::WebcamCapture;
+use crate::behavior::{builtins, BehaviorHandle, BehaviorRuntime};
+use crate::camera::{FrameSource, WebcamCapture};
 use crate::runtime::{PipelineRuntime, SINK_WINDOW, SOURCE_WEBCAM};
 use crate::signal::{SignalReader, SignalSchema, SignalSnapshot, SignalStore};
 
@@ -64,13 +64,16 @@ pub struct Engine {
     last_good: PipelineConfig,
     reload: ReloadState,
 
+    /// The signal schema (static `standard()` for now). Owned by the engine and
+    /// shared with the behavior thread.
+    schema: SignalSchema,
     /// The consumer end of the signal store; the producer end lives on the
     /// behavior thread. Read once per frame into `signals`.
     reader: SignalReader,
     /// The reusable per-frame snapshot buffer (allocated once).
     signals: SignalSnapshot,
-    /// The behavior thread. Held for its lifetime; dropping it stops + joins.
-    _behavior: BehaviorRuntime,
+    /// Control handle for the behavior thread. Dropping it stops + joins.
+    behavior: BehaviorHandle,
 
     frame_buf: Vec<u8>,
     start: Instant,
@@ -82,7 +85,12 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub async fn new(window: Arc<Window>, cam_width: u32, cam_height: u32) -> Self {
+    pub async fn new(
+        window: Arc<Window>,
+        cam_width: u32,
+        cam_height: u32,
+        frame: FrameSource,
+    ) -> Self {
         let gpu = GpuContext::new(window).await;
 
         let video = VideoTexture::new(&gpu.device, cam_width, cam_height);
@@ -120,9 +128,10 @@ impl Engine {
 
         // Signal store + behavior thread. The behavior thread publishes
         // `signal.time`; the CRT filter consumes it. They share only the store.
-        let (publisher, reader) = SignalStore::new(&SignalSchema::standard());
+        let schema = SignalSchema::standard();
+        let (publisher, reader) = SignalStore::new(&schema);
         let signals = reader.snapshot();
-        let behavior = BehaviorRuntime::spawn(publisher);
+        let behavior = BehaviorRuntime::spawn(publisher, schema, frame, vec![builtins::time::init()]);
 
         Self {
             gpu,
@@ -131,9 +140,10 @@ impl Engine {
             last_good: config.clone(),
             config,
             reload: ReloadState::new(),
+            schema,
             reader,
             signals,
-            _behavior: behavior,
+            behavior,
             frame_buf: Vec::new(),
             start: Instant::now(),
             frames: 0,
@@ -343,12 +353,16 @@ impl Engine {
         let pubs = self.reader.published();
         let signal_hz = (pubs - self.last_pubs) as f32 / dt;
         let builds = self.runtime.build_count();
-        let t = SignalSchema::standard()
+        let t = self
+            .schema
             .id("signal.time")
             .and_then(|id| self.signals.get(id).as_f32())
             .unwrap_or(0.0);
+        let b = self.behavior.stats();
         eprintln!(
-            "[spike] fps={fps:.1} builds={builds} signal_hz={signal_hz:.0} signal.time={t:+.3}"
+            "[spike] fps={fps:.1} builds={builds} signal_hz={signal_hz:.0} signal.time={t:+.3} \
+             | behavior {:.0}Hz update={:.0}us over_budget={}",
+            b.fps, b.last_update_us, b.over_budget
         );
         self.frames = 0;
         self.last_pubs = pubs;
