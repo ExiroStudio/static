@@ -35,7 +35,7 @@ use crate::addons::{CrtAddon, DotRendererAddon};
 use crate::behavior::BehaviorRuntime;
 use crate::camera::WebcamCapture;
 use crate::runtime::{PipelineRuntime, SINK_WINDOW, SOURCE_WEBCAM};
-use crate::signal::SignalBus;
+use crate::signal::{SignalReader, SignalSchema, SignalSnapshot, SignalStore};
 
 use gpu::GpuContext;
 use reload::ReloadState;
@@ -64,9 +64,11 @@ pub struct Engine {
     last_good: PipelineConfig,
     reload: ReloadState,
 
-    /// The signal bus: behaviors publish, filters consume. Shared with the
-    /// behavior thread.
-    bus: Arc<SignalBus>,
+    /// The consumer end of the signal store; the producer end lives on the
+    /// behavior thread. Read once per frame into `signals`.
+    reader: SignalReader,
+    /// The reusable per-frame snapshot buffer (allocated once).
+    signals: SignalSnapshot,
     /// The behavior thread. Held for its lifetime; dropping it stops + joins.
     _behavior: BehaviorRuntime,
 
@@ -116,10 +118,11 @@ impl Engine {
             .build(&gpu.device, &config)
             .expect("failed to build pipeline from pipeline.json");
 
-        // Signal bus + behavior thread. The behavior thread publishes
-        // `signal.time`; the CRT filter consumes it. They share only the bus.
-        let bus = Arc::new(SignalBus::new());
-        let behavior = BehaviorRuntime::spawn(bus.clone());
+        // Signal store + behavior thread. The behavior thread publishes
+        // `signal.time`; the CRT filter consumes it. They share only the store.
+        let (publisher, reader) = SignalStore::new(&SignalSchema::standard());
+        let signals = reader.snapshot();
+        let behavior = BehaviorRuntime::spawn(publisher);
 
         Self {
             gpu,
@@ -128,7 +131,8 @@ impl Engine {
             last_good: config.clone(),
             config,
             reload: ReloadState::new(),
-            bus,
+            reader,
+            signals,
             _behavior: behavior,
             frame_buf: Vec::new(),
             start: Instant::now(),
@@ -307,14 +311,14 @@ impl Engine {
         };
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
 
-        // One immutable snapshot of the bus per frame; every node reads from it.
-        let signals = self.bus.snapshot();
+        // One immutable, consistent snapshot per frame; every node reads from it.
+        self.reader.snapshot_into(&mut self.signals);
 
         let time = self.start.elapsed().as_secs_f32();
         self.runtime
-            .render(&self.gpu.device, &self.gpu.queue, &view, time, &signals); // encoder #1 (submits)
+            .render(&self.gpu.device, &self.gpu.queue, &view, time, &self.signals); // encoder #1 (submits)
 
-        self.log_stats(&signals);
+        self.log_stats();
 
         overlay(
             &self.gpu.device,
@@ -329,17 +333,20 @@ impl Engine {
     /// Spike instrumentation: once per second, report FPS, rebuild count, signal
     /// publish frequency, and the current `signal.time`. The invariant to watch
     /// is `builds` staying constant while `signal.time` oscillates.
-    fn log_stats(&mut self, signals: &crate::signal::SignalSnapshot) {
+    fn log_stats(&mut self) {
         self.frames += 1;
         let dt = self.last_stat.elapsed().as_secs_f32();
         if dt < 1.0 {
             return;
         }
         let fps = self.frames as f32 / dt;
-        let pubs = self.bus.published_count();
+        let pubs = self.reader.published();
         let signal_hz = (pubs - self.last_pubs) as f32 / dt;
         let builds = self.runtime.build_count();
-        let t = signals.get("signal.time").unwrap_or(0.0);
+        let t = SignalSchema::standard()
+            .id("signal.time")
+            .and_then(|id| self.signals.get(id).as_f32())
+            .unwrap_or(0.0);
         eprintln!(
             "[spike] fps={fps:.1} builds={builds} signal_hz={signal_hz:.0} signal.time={t:+.3}"
         );

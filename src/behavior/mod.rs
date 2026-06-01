@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::signal::{SignalBus, SignalValue};
+use crate::signal::{SignalPublisher, SignalSchema, SignalValue};
 
 /// Owns the behavior thread. Dropping it signals the thread to stop and joins.
 pub struct BehaviorRuntime {
@@ -23,18 +23,23 @@ pub struct BehaviorRuntime {
 }
 
 impl BehaviorRuntime {
-    /// Spawn the behavior thread against a shared bus.
-    pub fn spawn(bus: Arc<SignalBus>) -> Self {
+    /// Spawn the behavior thread, moving the single [`SignalPublisher`] onto it.
+    pub fn spawn(mut publisher: SignalPublisher) -> Self {
         let running = Arc::new(AtomicBool::new(true));
         let flag = running.clone();
 
         let handle = thread::Builder::new()
             .name("behavior".into())
             .spawn(move || {
+                // Resolve the slot once; the loop addresses it by id.
+                let time_id = SignalSchema::standard()
+                    .id("signal.time")
+                    .expect("standard schema includes signal.time");
                 let start = Instant::now();
                 while flag.load(Ordering::Relaxed) {
                     let t = start.elapsed().as_secs_f32();
-                    bus.publish("signal.time", SignalValue::F32(t.sin()));
+                    publisher.set(time_id, SignalValue::F32(t.sin()));
+                    publisher.publish();
                     thread::sleep(Duration::from_millis(16));
                 }
             })

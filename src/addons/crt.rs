@@ -20,7 +20,7 @@ use wgpu::*;
 use super::{base_manifest, build_shader_pass, f32_param, record_fullscreen_pass};
 use crate::addon::manifest::Manifest;
 use crate::runtime::{BuiltinAddon, FilterNode, FrameContext, ResolvedConfig};
-use crate::signal::SignalSnapshot;
+use crate::signal::{SignalId, SignalSchema, SignalSnapshot};
 
 /// The signal CRT consumes, and how far it swings brightness around its
 /// configured base. base 1.1 ± 0.8 → ~0.3..1.9: a clearly visible oscillation.
@@ -53,11 +53,13 @@ struct CrtNode {
     params: CrtParams,
     /// The configured brightness — the centre the signal oscillates around.
     base_brightness: f32,
+    /// `signal.time`, resolved once at build — no string compare per frame.
+    time_id: SignalId,
 }
 
 impl FilterNode for CrtNode {
     fn prepare(&mut self, queue: &Queue, signals: &SignalSnapshot) {
-        let t = signals.get(TIME_SIGNAL).unwrap_or(0.0);
+        let t = signals.get(self.time_id).as_f32().unwrap_or(0.0);
         self.params.brightness = self.base_brightness + t * BRIGHTNESS_AMPLITUDE;
         // Update the existing uniform in place — no rebuild, no new resources.
         queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
@@ -121,12 +123,16 @@ impl BuiltinAddon for CrtAddon {
             include_str!("../shaders/crt.wgsl"),
             bytemuck::bytes_of(&params),
         );
+        let time_id = SignalSchema::standard()
+            .id(TIME_SIGNAL)
+            .expect("standard schema includes signal.time");
         Box::new(CrtNode {
             pipeline: pass.pipeline,
             params_bg: pass.params_bg,
             params_buf: pass.params_buf,
             base_brightness: params.brightness,
             params,
+            time_id,
         })
     }
 }
