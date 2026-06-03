@@ -2,4 +2,3 @@
 .claude
 /addons
 # Built addon packages (regenerable from examples/<addon>/)
-/examples

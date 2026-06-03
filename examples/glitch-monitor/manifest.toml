@@ -1,0 +1,73 @@
+manifest_version = 1
+
+# ---- identity ----
+id          = "glitch-monitor"
+name        = "Glitch Monitor"
+version     = "1.0.0"
+author      = "Static Labs"
+description = "Monochrome surveillance glitch: horizontal tearing, signal corruption, scan disruption and block dropout."
+license     = "MIT"
+tags        = ["glitch", "monitor", "surveillance", "monochrome"]
+
+# ---- engine compatibility ----
+api_min = 1
+api_max = 1
+
+# ---- kind ----
+kind = "pipeline"
+
+# ---- declarations ----
+[permissions]
+filesystem = "addon_local"
+network    = "none"
+gpu        = "default"
+
+[[shaders]]
+id    = "main"
+path  = "shaders/glitch.wgsl"
+stage = "fragment"
+entry = "fs_main"
+
+[[assets]]
+id   = "preset_heavy"
+path = "assets/presets/heavy.json"
+kind = "preset"
+
+# ---- parameters (drive the schema-generated config UI) ----
+# Declared alphabetically; the engine sorts by key, so a generic runner can pack
+# them into the shader's @group(2) uniform in this exact order.
+[params.block_size]
+type    = "f32"
+default = 16.0
+min     = 2.0
+max     = 64.0
+label   = "Block Size"
+group   = "Glitch"
+help    = "Size, in pixels, of dropout and displacement blocks."
+
+[params.displacement]
+type    = "f32"
+default = 0.4
+min     = 0.0
+max     = 1.0
+label   = "Displacement"
+group   = "Glitch"
+help    = "Maximum horizontal tear offset."
+
+[params.frequency]
+type    = "f32"
+default = 0.5
+min     = 0.0
+max     = 1.0
+label   = "Frequency"
+group   = "Glitch"
+help    = "How often disruptions occur."
+
+[params.intensity]
+type    = "f32"
+default = 0.6
+min     = 0.0
+max     = 1.0
+label   = "Intensity"
+group   = "Glitch"
+help    = "Overall strength of the corruption."

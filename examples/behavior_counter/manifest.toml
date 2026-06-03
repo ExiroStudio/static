@@ -1,0 +1,39 @@
+manifest_version = 1
+
+# ---- identity ----
+id          = "behavior-counter"
+name        = "Counter (example)"
+version     = "1.0.0"
+author      = "Static examples"
+description = "Reference stateful behavior: publishes a monotonically increasing counter.value."
+license     = "MIT"
+tags        = ["behavior", "example", "signal", "stateful"]
+
+# ---- engine compatibility ----
+api_min = 1
+api_max = 1
+
+# ---- kind ----
+kind = "behavior"
+
+# ---- parameters ----
+# Behaviors take config the same way filters do: a schema here generates the UI,
+# and SetParam is a hot update (no instance recreate). `rate` scales how fast the
+# counter advances.
+[params.rate]
+type    = "f32"
+default = 1.0
+min     = 0.0
+max     = 10.0
+label   = "Rate"
+group   = "Counter"
+help    = "Counter increments per second (scaled by tick dt)."
+
+# ---- signals ----
+# A second producer alongside `time`. Because both publish into the same schema,
+# adding this behavior appends `counter.value` and leaves `signal.time`'s id
+# fixed — which is exactly what lets the engine's minimal reload keep the `time`
+# behavior running untouched.
+[[publish]]
+name = "counter.value"
+kind = "f32"

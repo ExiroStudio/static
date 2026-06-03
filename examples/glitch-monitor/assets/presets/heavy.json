@@ -1,0 +1,10 @@
+{
+  "name": "Heavy Surveillance",
+  "description": "Aggressive tearing and dropout for a failing-camera look.",
+  "params": {
+    "intensity": 0.9,
+    "frequency": 0.8,
+    "block_size": 24.0,
+    "displacement": 0.7
+  }
+}

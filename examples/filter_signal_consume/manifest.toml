@@ -1,0 +1,48 @@
+manifest_version = 1
+
+# ---- identity ----
+id          = "filter-signal-consume"
+name        = "Signal Pulse (example)"
+version     = "1.0.0"
+author      = "Static examples"
+description = "Minimal signal-consuming filter: pulses brightness with signal.time via @group(3)."
+license     = "MIT"
+tags        = ["filter", "example", "signal", "consume"]
+
+# ---- engine compatibility ----
+api_min = 1
+api_max = 1
+
+# ---- kind ----
+# A pipeline (filter) addon. It ships no compiled code — the engine's generic
+# external-shader runner loads the WGSL, composes it with the prelude, packs the
+# params into @group(2), and (because `consume` is non-empty) builds the
+# @group(3) signals uniform and refreshes it every frame.
+kind = "pipeline"
+
+[[shaders]]
+id    = "main"
+path  = "shaders/pulse.wgsl"
+stage = "fragment"
+entry = "fs_main"
+
+# ---- parameters ----
+# Numeric params are packed into @group(2) in sorted-key order. One real param
+# (`strength`) → the shader pads its struct to a 16-byte vec4.
+[params.strength]
+type    = "f32"
+default = 0.8
+min     = 0.0
+max     = 1.0
+label   = "Strength"
+group   = "Pulse"
+help    = "How strongly signal.time modulates brightness."
+
+# ---- signals consumed ----
+# `optional = true`: if no behavior publishes signal.time, the @group(3) slot
+# reads 0.0 (the fallback) and the image is steady — the filter still loads and
+# runs. Declared `consume` order defines @group(3) packing order.
+[[consume]]
+name     = "signal.time"
+kind     = "f32"
+optional = true

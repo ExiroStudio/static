@@ -1,0 +1,27 @@
+manifest_version = 1
+
+# ---- identity ----
+id          = "behavior-time"
+name        = "Time (example)"
+version     = "1.0.0"
+author      = "Static examples"
+description = "Reference behavior addon: publishes signal.time = sin(elapsed)."
+license     = "MIT"
+tags        = ["behavior", "example", "signal"]
+
+# ---- engine compatibility ----
+api_min = 1
+api_max = 1
+
+# ---- kind ----
+# A behavior runs on the behavior thread (~30 Hz), reads no GPU, and only
+# publishes signals. This mirrors the engine's builtin `time` behavior verbatim
+# so addon authors can see the exact manifest shape a producer declares.
+kind = "behavior"
+
+# ---- signals ----
+# Each [[publish]] entry becomes one slot in the signal schema. A filter that
+# declares the same name under `consume` receives it live, with no rebuild.
+[[publish]]
+name = "signal.time"
+kind = "f32"
