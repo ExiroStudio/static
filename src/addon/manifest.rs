@@ -8,12 +8,13 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use super::error::{AddonError, Result};
 use super::schema::ParamSpec;
+use crate::signal::{SignalRef, SignalSpec};
 
 pub const MANIFEST_FILENAME: &str = "manifest.toml";
 
@@ -55,14 +56,24 @@ pub struct Manifest {
     pub assets: Vec<AssetDecl>,
     #[serde(default)]
     pub params: BTreeMap<String, ParamSpec>,
+
+    // ---- signals ----
+    /// Signals this addon publishes (behaviors).
+    #[serde(default)]
+    pub publish: Vec<SignalSpec>,
+    /// Signals this addon consumes (filters).
+    #[serde(default)]
+    pub consume: Vec<SignalRef>,
 }
 
-/// What kind of addon this is. v1 only loads pipeline-node addons; sources
-/// and sinks are engine-shipped and not pluggable through the addon ecosystem.
+/// What kind of addon this is. Pipeline (filter) addons run on the render
+/// thread; behavior addons are producers that run on the behavior thread and
+/// only publish signals. Sources and sinks remain engine-shipped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AddonKind {
     Pipeline,
+    Behavior,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -218,21 +229,6 @@ impl Manifest {
         Ok(())
     }
 
-    /// Resolve a declared shader path against the addon's root directory.
-    pub fn shader_path(&self, root: &Path, shader_id: &str) -> Option<PathBuf> {
-        self.shaders
-            .iter()
-            .find(|s| s.id == shader_id)
-            .map(|s| root.join(&s.path))
-    }
-
-    /// Resolve a declared asset path against the addon's root directory.
-    pub fn asset_path(&self, root: &Path, asset_id: &str) -> Option<PathBuf> {
-        self.assets
-            .iter()
-            .find(|a| a.id == asset_id)
-            .map(|a| root.join(&a.path))
-    }
 }
 
 fn is_valid_id(id: &str) -> bool {

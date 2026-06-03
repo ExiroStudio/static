@@ -16,6 +16,8 @@ mod schema;
 mod store;
 mod value;
 
-pub use schema::{SignalId, SignalSchema};
+pub use schema::{
+    SchemaError, SignalId, SignalRef, SignalSchema, SignalSchemaBuilder, SignalSpec,
+};
 pub use store::{SignalPublisher, SignalReader, SignalSnapshot, SignalStore};
-pub use value::SignalValue;
+pub use value::{SignalKind, SignalValue};

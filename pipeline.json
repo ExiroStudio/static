@@ -1,5 +1,5 @@
 {
-  "format_version": 1,
+  "format_version": 2,
   "name": "Default — surveillance dots",
   "source": {
     "type": "webcam",
@@ -9,14 +9,14 @@
     {
       "instance_id": "node-crt",
       "addon": "crt",
-      "enabled": true,
+      "enabled": false,
       "config": {
-        "aperture": 0.47,
+        "aperture": 0.26,
         "brightness": 1.1,
-        "curvature": 0.6000000000000001,
-        "persistence": 0.51,
-        "scanline": 0.47,
-        "vignette": 0.61
+        "curvature": 0.65,
+        "persistence": 0.15000000000000002,
+        "scanline": 0.22000000000000003,
+        "vignette": 0.35000000000000003
       }
     },
     {
@@ -30,6 +30,14 @@
         "exposure": 1.1,
         "mirror": true
       }
+    }
+  ],
+  "behaviors": [
+    {
+      "instance_id": "beh-time",
+      "addon": "time",
+      "enabled": true,
+      "config": {}
     }
   ],
   "sink": {

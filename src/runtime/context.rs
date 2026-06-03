@@ -15,7 +15,38 @@ use wgpu::*;
 
 use crate::addon::manifest::Manifest;
 use crate::addon::schema::{ParamMap, ParamSpec, ParamValue};
-use crate::signal::SignalSnapshot;
+use crate::signal::{SignalId, SignalRef, SignalSchema, SignalSnapshot};
+
+/// A filter's resolved consume bindings, handed to `instantiate` so the filter
+/// can resolve each declared signal name to a stable [`SignalId`] **once** (and
+/// build its `@group(3)` binding). Resolution is scoped to what the filter
+/// declared in its manifest `consume` list — asking for an undeclared signal
+/// returns `None`.
+pub struct SignalContext<'a> {
+    schema: &'a SignalSchema,
+    consume: &'a [SignalRef],
+}
+
+impl<'a> SignalContext<'a> {
+    pub fn new(schema: &'a SignalSchema, consume: &'a [SignalRef]) -> Self {
+        Self { schema, consume }
+    }
+
+    /// Resolve a declared consumed signal to its slot. `None` if the filter did
+    /// not declare it, or it is optional and unpublished.
+    pub fn id(&self, name: &str) -> Option<SignalId> {
+        if self.consume.iter().any(|r| r.name == name) {
+            self.schema.id(name)
+        } else {
+            None
+        }
+    }
+
+    /// The declared consume list — defines `@group(3)` packing order.
+    pub fn consume(&self) -> &[SignalRef] {
+        self.consume
+    }
+}
 
 /// Everything a node needs to record one frame's worth of work.
 ///
@@ -66,6 +97,7 @@ pub trait BuiltinAddon {
         image_layout: &BindGroupLayout,
         format: TextureFormat,
         config: &ResolvedConfig,
+        signals: &SignalContext,
     ) -> Box<dyn FilterNode>;
 }
 
@@ -76,6 +108,7 @@ pub type NodeFactory = fn(
     &BindGroupLayout,
     TextureFormat,
     &ResolvedConfig,
+    &SignalContext,
 ) -> Box<dyn FilterNode>;
 
 /// A node's configuration with manifest defaults filled in. Validation has
@@ -150,4 +183,28 @@ pub fn params_bind_group(device: &Device, layout: &BindGroupLayout, buffer: &Buf
             resource: buffer.as_entire_binding(),
         }],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::signal::SignalKind;
+
+    #[test]
+    fn signal_context_resolves_only_declared_signals() {
+        let schema = SignalSchema::from_pairs(&[
+            ("signal.time", SignalKind::F32),
+            ("other", SignalKind::F32),
+        ]);
+        let consume = vec![SignalRef {
+            name: "signal.time".into(),
+            kind: SignalKind::F32,
+            optional: true,
+        }];
+        let ctx = SignalContext::new(&schema, &consume);
+        assert!(ctx.id("signal.time").is_some(), "declared + in schema");
+        assert!(ctx.id("other").is_none(), "in schema but not declared → None");
+        assert!(ctx.id("missing").is_none(), "neither declared nor in schema");
+        assert_eq!(ctx.consume().len(), 1);
+    }
 }

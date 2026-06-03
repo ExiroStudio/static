@@ -17,6 +17,7 @@
 
 pub mod context;
 pub mod host;
+pub mod signals_group;
 pub mod sink;
 pub mod targets;
 
@@ -33,13 +34,14 @@ use crate::engine::image::ImageBinding;
 
 pub use context::{
     params_bind_group, params_layout, BuiltinAddon, FilterNode, FrameContext, NodeFactory,
-    ResolvedConfig,
+    ResolvedConfig, SignalContext,
 };
+pub use signals_group::{signals_layout, SignalsBinding};
 use host::HostUniform;
 use sink::WindowSink;
 use targets::RenderTarget;
 
-use crate::signal::SignalSnapshot;
+use crate::signal::{SignalSchema, SignalSnapshot};
 
 /// The source kind v1 ships. Sources are engine-shipped, not addons; the engine
 /// owns the webcam texture and hands its view to the runtime.
@@ -53,6 +55,9 @@ pub struct PipelineRuntime {
     /// Manifests of the builtin addons, kept so a registry rescan (after an
     /// install/uninstall) can re-register them alongside the on-disk addons.
     builtin_manifests: Vec<Manifest>,
+    /// Manifests of builtin behavior addons (registered for listing/validation;
+    /// they have no filter factory — the behavior runtime constructs them).
+    behavior_manifests: Vec<Manifest>,
 
     // Host-owned GPU resources, shared by every node.
     host: HostUniform,
@@ -95,6 +100,7 @@ impl PipelineRuntime {
             registry: AddonRegistry::new(),
             factories: HashMap::new(),
             builtin_manifests: Vec::new(),
+            behavior_manifests: Vec::new(),
             host,
             image,
             format,
@@ -122,6 +128,13 @@ impl PipelineRuntime {
         Ok(())
     }
 
+    /// Register a builtin behavior addon by manifest only — it appears in the
+    /// registry (for UI listing + schema validation) but has no filter factory.
+    pub fn register_behavior(&mut self, manifest: Manifest) -> Result<()> {
+        self.behavior_manifests.push(manifest.clone());
+        self.registry.register_builtin(manifest)
+    }
+
     /// Scan an addons directory for on-disk addons, in addition to whatever is
     /// already registered (builtins). Missing directory → no-op. Used at
     /// startup to pick up installed addons.
@@ -135,6 +148,9 @@ impl PipelineRuntime {
     pub fn rescan_addons(&mut self, root: &Path) -> Result<()> {
         self.registry.clear();
         for manifest in &self.builtin_manifests {
+            self.registry.register_builtin(manifest.clone())?;
+        }
+        for manifest in &self.behavior_manifests {
             self.registry.register_builtin(manifest.clone())?;
         }
         self.registry.scan(root)
@@ -164,7 +180,12 @@ impl PipelineRuntime {
     /// node. Rejects unknown sources/sinks, unknown or incompatible addons, and
     /// invalid params *before* any rendering happens. On success the live
     /// pipeline replaces whatever was running.
-    pub fn build(&mut self, device: &Device, config: &PipelineConfig) -> Result<()> {
+    pub fn build(
+        &mut self,
+        device: &Device,
+        config: &PipelineConfig,
+        schema: &SignalSchema,
+    ) -> Result<()> {
         config.validate_structure()?;
 
         if config.source.kind != SOURCE_WEBCAM {
@@ -196,6 +217,7 @@ impl PipelineRuntime {
                 .get(&node.addon)
                 .expect("validate_against guarantees the addon is installed");
             let resolved = ResolvedConfig::new(&entry.manifest.params, &node.config);
+            let signals = SignalContext::new(schema, &entry.manifest.consume);
 
             let instance = match self.factories.get(&node.addon) {
                 // A compiled-in addon (builtin) supplies its own factory.
@@ -205,10 +227,12 @@ impl PipelineRuntime {
                     &self.image.layout,
                     self.format,
                     &resolved,
+                    &signals,
                 ),
                 // Otherwise fall back to the generic external-shader runner,
-                // which loads the addon's declared WGSL off disk.
-                None => self.build_external(device, entry, &resolved)?,
+                // which loads the addon's declared WGSL off disk and wires its
+                // declared `consume` signals into `@group(3)` (same as builtins).
+                None => self.build_external(device, entry, &resolved, &signals)?,
             };
             nodes.push(instance);
         }
@@ -233,6 +257,7 @@ impl PipelineRuntime {
         device: &Device,
         entry: &AddonEntry,
         resolved: &ResolvedConfig,
+        signals: &SignalContext,
     ) -> Result<Box<dyn FilterNode>> {
         let shader = entry
             .manifest
@@ -264,6 +289,7 @@ impl PipelineRuntime {
             &entry.manifest.id,
             &src,
             &params,
+            signals,
         ))
     }
 

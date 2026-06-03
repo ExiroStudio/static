@@ -49,6 +49,8 @@ mod tests {
             shaders: vec![],
             assets: vec![],
             params: Default::default(),
+            publish: vec![],
+            consume: vec![],
         }
     }
 

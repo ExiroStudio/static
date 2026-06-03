@@ -74,6 +74,56 @@ impl WebcamCapture {
         slot.dirty = false;
         true
     }
+
+    /// A cheap, cloneable handle to the same frame slot for a *second* consumer
+    /// (the behavior thread). It reads the latest frame without consuming the
+    /// renderer's `dirty` flag, so the two never contend over frames.
+    pub fn frame_source(&self) -> FrameSource {
+        FrameSource {
+            slot: self.latest.clone(),
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
+/// Read-only, peek-based view of the webcam's latest frame for a non-render
+/// consumer. `Clone` is a cheap `Arc` bump.
+#[derive(Clone)]
+pub struct FrameSource {
+    slot: Arc<Mutex<FrameSlot>>,
+    width: u32,
+    height: u32,
+}
+
+impl FrameSource {
+    /// An empty source that never yields a frame — for behaviors that don't
+    /// read pixels and for tests with no camera.
+    #[allow(dead_code)] // test/utility constructor; the live engine always has a camera source
+    pub fn empty() -> Self {
+        FrameSource {
+            slot: Arc::new(Mutex::new(FrameSlot {
+                data: Vec::new(),
+                dirty: false,
+            })),
+            width: 0,
+            height: 0,
+        }
+    }
+
+    /// Peek the latest decoded frame into `out` *without* clearing the
+    /// renderer's `dirty` flag (best-effort, latest-wins). Returns the frame
+    /// dimensions if any frame has been decoded yet. Holds the lock only for
+    /// the copy.
+    pub fn peek(&self, out: &mut Vec<u8>) -> Option<(u32, u32)> {
+        let slot = self.slot.lock().unwrap();
+        if slot.data.is_empty() {
+            return None;
+        }
+        out.clear();
+        out.extend_from_slice(&slot.data);
+        Some((self.width, self.height))
+    }
 }
 
 fn capture_loop(shared: Arc<Mutex<FrameSlot>>, dims_tx: mpsc::Sender<(u32, u32)>) {

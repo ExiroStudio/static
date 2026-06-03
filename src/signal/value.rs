@@ -5,10 +5,12 @@
 //! of signals is a flat array that can be snapshotted with a single `memcpy`.
 
 /// The type a signal slot holds. Declared once in the [`SignalSchema`] and used
-/// to seed defaults and (in debug) validate publishes.
+/// to seed defaults and (in debug) validate publishes. Serializes as a
+/// snake_case string in manifests (`"f32"`, `"vec3"`, …).
 ///
 /// [`SignalSchema`]: crate::signal::SignalSchema
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SignalKind {
     Bool,
     F32,

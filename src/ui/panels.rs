@@ -12,8 +12,10 @@ use std::collections::{BTreeMap, HashSet};
 
 use egui::{Align, Align2, Color32, Context, Id, Layout, RichText, Sense, Stroke};
 
+use crate::addon::manifest::AddonKind;
 use crate::addon::schema::{ParamMap, ParamSpec, ParamValue};
 use crate::engine::Engine;
+use crate::signal::{SignalKind, SignalValue};
 
 use super::state::UiState;
 use super::widgets;
@@ -37,9 +39,17 @@ struct PropData {
 struct InstalledRow {
     id: String,
     name: String,
+    kind: AddonKind,
     builtin: bool,
     runnable: bool,
     in_use: bool,
+}
+
+/// One live signal row in the inspector: name, kind label, formatted value.
+struct SignalRow {
+    name: String,
+    kind: &'static str,
+    value: String,
 }
 
 /// Intents collected while drawing; applied to the engine after the panels
@@ -54,6 +64,14 @@ struct Intents {
     uninstall: Option<String>,
     param_edits: Vec<(String, ParamValue)>,
     prop_instance: Option<String>,
+
+    // ---- behavior intents (unordered set) ----
+    beh_select: Option<String>,
+    beh_toggle: Option<(String, bool)>,
+    beh_remove: Option<String>,
+    beh_add: Option<String>,
+    beh_param_edits: Vec<(String, ParamValue)>,
+    beh_prop_instance: Option<String>,
 }
 
 pub fn draw(ctx: &Context, engine: &mut Engine, state: &mut UiState) {
@@ -97,6 +115,50 @@ pub fn draw(ctx: &Context, engine: &mut Engine, state: &mut UiState) {
         })
     });
 
+    // Behaviors (unordered producer set) + the selected behavior's properties.
+    let behaviors: Vec<NodeRow> = engine
+        .config()
+        .behaviors
+        .iter()
+        .map(|n| {
+            let (label, installed) = match engine.registry().get(&n.addon) {
+                Some(e) => (e.manifest.name.clone(), true),
+                None => (n.addon.clone(), false),
+            };
+            NodeRow {
+                instance_id: n.instance_id.clone(),
+                label,
+                enabled: n.enabled,
+                installed,
+            }
+        })
+        .collect();
+
+    let beh_prop: Option<PropData> = state.selected_behavior.as_ref().and_then(|id| {
+        let node = engine.config().get_behavior(id)?;
+        let entry = engine.registry().get(&node.addon)?;
+        Some(PropData {
+            instance_id: id.clone(),
+            addon_name: entry.manifest.name.clone(),
+            specs: entry.manifest.params.clone(),
+            values: node.config.clone(),
+        })
+    });
+
+    // Live signal snapshot for the inspector.
+    let signals: Vec<SignalRow> = {
+        let snap = engine.signal_snapshot();
+        engine
+            .signal_schema()
+            .iter()
+            .map(|(id, name, kind)| SignalRow {
+                name: name.to_string(),
+                kind: kind_label(kind),
+                value: format_signal(snap.get(id)),
+            })
+            .collect()
+    };
+
     let installed: Vec<InstalledRow> = {
         let mut v: Vec<InstalledRow> = engine
             .registry()
@@ -104,6 +166,7 @@ pub fn draw(ctx: &Context, engine: &mut Engine, state: &mut UiState) {
             .map(|e| InstalledRow {
                 id: e.manifest.id.clone(),
                 name: e.manifest.name.clone(),
+                kind: e.manifest.kind,
                 builtin: e.builtin,
                 runnable: engine.is_runnable(&e.manifest.id),
                 in_use: used.contains(&e.manifest.id),
@@ -116,6 +179,7 @@ pub fn draw(ctx: &Context, engine: &mut Engine, state: &mut UiState) {
 
     let mut intents = Intents {
         prop_instance: prop.as_ref().map(|p| p.instance_id.clone()),
+        beh_prop_instance: beh_prop.as_ref().map(|p| p.instance_id.clone()),
         ..Default::default()
     };
 
@@ -137,6 +201,12 @@ pub fn draw(ctx: &Context, engine: &mut Engine, state: &mut UiState) {
                     properties_section(ui, &prop, &mut intents);
                     ui.add_space(10.0);
                     ui.separator();
+                    behaviors_section(ui, &behaviors, &beh_prop, &mut intents, state);
+                    ui.add_space(10.0);
+                    ui.separator();
+                    signal_inspector_section(ui, &signals, state);
+                    ui.add_space(10.0);
+                    ui.separator();
                     installed_section(ui, &installed, state, &mut intents);
                 });
 
@@ -152,6 +222,9 @@ pub fn draw(ctx: &Context, engine: &mut Engine, state: &mut UiState) {
     // ---------- modal dialogs ----------
     if state.show_add {
         add_dialog(ctx, &installed, state, &mut intents);
+    }
+    if state.show_add_behavior {
+        add_behavior_dialog(ctx, &installed, state, &mut intents);
     }
     if state.confirm_uninstall.is_some() {
         confirm_uninstall_dialog(ctx, state, &mut intents);
@@ -187,6 +260,30 @@ pub fn draw(ctx: &Context, engine: &mut Engine, state: &mut UiState) {
     if let (Some(p), false) = (&intents.prop_instance, intents.param_edits.is_empty()) {
         for (key, value) in intents.param_edits {
             engine.set_param(p, &key, value);
+        }
+    }
+
+    // ---- behavior intents ----
+    if let Some(id) = intents.beh_select {
+        state.selected_behavior = Some(id);
+    }
+    if let Some((id, enabled)) = intents.beh_toggle {
+        engine.set_behavior_enabled(&id, enabled);
+    }
+    if let Some(id) = intents.beh_remove {
+        if state.selected_behavior.as_deref() == Some(id.as_str()) {
+            state.selected_behavior = None;
+        }
+        engine.remove_behavior(&id);
+    }
+    if let Some(addon) = intents.beh_add {
+        let new_id = engine.add_behavior(&addon);
+        state.selected_behavior = Some(new_id);
+        state.show_add_behavior = false;
+    }
+    if let (Some(p), false) = (&intents.beh_prop_instance, intents.beh_param_edits.is_empty()) {
+        for (key, value) in intents.beh_param_edits {
+            engine.set_behavior_param(p, &key, value);
         }
     }
 }
@@ -325,6 +422,174 @@ fn properties_section(ui: &mut egui::Ui, prop: &Option<PropData>, intents: &mut 
     }
 }
 
+/// The behavior set — unordered (no drag/reorder), each with enable/disable,
+/// select, and remove. The selected behavior's properties render below.
+fn behaviors_section(
+    ui: &mut egui::Ui,
+    behaviors: &[NodeRow],
+    beh_prop: &Option<PropData>,
+    intents: &mut Intents,
+    state: &mut UiState,
+) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("BEHAVIORS").small().strong());
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui.button("➕ Add Behavior").clicked() {
+                state.show_add_behavior = true;
+            }
+        });
+    });
+    ui.add_space(2.0);
+
+    if behaviors.is_empty() {
+        ui.weak("No behaviors — add one to publish signals.");
+    }
+
+    for n in behaviors {
+        let selected = state.selected_behavior.as_deref() == Some(n.instance_id.as_str());
+        let fill = if selected {
+            Color32::from_rgb(40, 46, 58)
+        } else {
+            Color32::from_rgb(28, 31, 37)
+        };
+        egui::Frame::none()
+            .fill(fill)
+            .inner_margin(7.0)
+            .rounding(6.0)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let eye = if n.enabled { "👁" } else { "🚫" };
+                    if ui
+                        .add(egui::Button::new(eye).frame(false))
+                        .on_hover_text("Enable / disable")
+                        .clicked()
+                    {
+                        intents.beh_toggle = Some((n.instance_id.clone(), !n.enabled));
+                    }
+                    let mut text = RichText::new(&n.label);
+                    if !n.enabled {
+                        text = text.weak().strikethrough();
+                    }
+                    if ui
+                        .add(egui::Label::new(text).sense(Sense::click()))
+                        .clicked()
+                    {
+                        intents.beh_select = Some(n.instance_id.clone());
+                    }
+                    if !n.installed {
+                        ui.colored_label(Color32::from_rgb(230, 140, 140), "missing");
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new("🗑").frame(false))
+                            .on_hover_text("Remove behavior")
+                            .clicked()
+                        {
+                            intents.beh_remove = Some(n.instance_id.clone());
+                        }
+                    });
+                });
+            });
+        ui.add_space(3.0);
+    }
+
+    // Selected behavior's properties (schema-driven, same renderer as filters).
+    match beh_prop {
+        None => {
+            ui.add_space(2.0);
+            ui.weak("Select a behavior to configure it.");
+        }
+        Some(p) => {
+            ui.add_space(4.0);
+            ui.label(RichText::new(&p.addon_name).strong());
+            if p.specs.is_empty() {
+                ui.weak("This behavior has no settings.");
+            } else {
+                properties(ui, p, &mut intents.beh_param_edits);
+            }
+        }
+    }
+}
+
+/// Live, read-only view of every signal in the schema and its current value.
+fn signal_inspector_section(ui: &mut egui::Ui, signals: &[SignalRow], state: &mut UiState) {
+    let resp = egui::CollapsingHeader::new("Signal Inspector")
+        .default_open(state.inspector_open)
+        .show(ui, |ui| {
+            if signals.is_empty() {
+                ui.weak("No signals — add a behavior that publishes one.");
+            }
+            for s in signals {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&s.name).monospace());
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(RichText::new(&s.value).monospace().color(ACCENT));
+                        ui.weak(s.kind);
+                    });
+                });
+            }
+        });
+    state.inspector_open = resp.openness > 0.5;
+}
+
+/// The "Add Behavior" modal — lists installed behavior-kind addons.
+fn add_behavior_dialog(
+    ctx: &Context,
+    installed: &[InstalledRow],
+    state: &mut UiState,
+    intents: &mut Intents,
+) {
+    egui::Window::new("Add Behavior")
+        .collapsible(false)
+        .resizable(false)
+        .movable(false)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label("Available behaviors");
+            ui.add_space(4.0);
+            let behaviors: Vec<&InstalledRow> = installed
+                .iter()
+                .filter(|a| a.kind == AddonKind::Behavior)
+                .collect();
+            if behaviors.is_empty() {
+                ui.weak("No behavior addons installed.");
+            }
+            for a in behaviors {
+                if ui.add_sized([260.0, 28.0], egui::Button::new(&a.name)).clicked() {
+                    intents.beh_add = Some(a.id.clone());
+                }
+            }
+            ui.add_space(6.0);
+            ui.separator();
+            if ui.button("Cancel").clicked() {
+                state.show_add_behavior = false;
+            }
+        });
+}
+
+fn kind_label(kind: SignalKind) -> &'static str {
+    match kind {
+        SignalKind::Bool => "bool",
+        SignalKind::F32 => "f32",
+        SignalKind::I32 => "i32",
+        SignalKind::Vec2 => "vec2",
+        SignalKind::Vec3 => "vec3",
+        SignalKind::Vec4 => "vec4",
+    }
+}
+
+fn format_signal(v: SignalValue) -> String {
+    match v {
+        SignalValue::Bool(b) => b.to_string(),
+        SignalValue::F32(x) => format!("{x:+.3}"),
+        SignalValue::I32(i) => i.to_string(),
+        SignalValue::Vec2([a, b]) => format!("({a:+.2}, {b:+.2})"),
+        SignalValue::Vec3([a, b, c]) => format!("({a:+.2}, {b:+.2}, {c:+.2})"),
+        SignalValue::Vec4([a, b, c, d]) => format!("({a:+.2}, {b:+.2}, {c:+.2}, {d:+.2})"),
+    }
+}
+
 fn installed_section(
     ui: &mut egui::Ui,
     installed: &[InstalledRow],
@@ -380,12 +645,16 @@ fn add_dialog(
         .movable(false)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.label("Available addons");
+            ui.label("Available filters");
             ui.add_space(4.0);
-            if installed.is_empty() {
-                ui.weak("No addons installed.");
+            let filters: Vec<&InstalledRow> = installed
+                .iter()
+                .filter(|a| a.kind == AddonKind::Pipeline)
+                .collect();
+            if filters.is_empty() {
+                ui.weak("No filter addons installed.");
             }
-            for a in installed {
+            for a in filters {
                 let mut button = egui::Button::new(&a.name);
                 if !a.runnable {
                     button = button.fill(Color32::from_rgb(45, 38, 30));

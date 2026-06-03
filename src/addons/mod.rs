@@ -23,7 +23,11 @@ use wgpu::*;
 use crate::addon::manifest::{AddonKind, Manifest, CURRENT_MANIFEST_VERSION};
 use crate::addon::schema::{ParamSpec, UiHints};
 use crate::effects::{fullscreen_pipeline, make_module};
-use crate::runtime::{params_bind_group, params_layout, FilterNode, FrameContext};
+use crate::runtime::{
+    params_bind_group, params_layout, signals_layout, FilterNode, FrameContext, SignalContext,
+    SignalsBinding,
+};
+use crate::signal::SignalSnapshot;
 
 /// Record one fullscreen pass: bind `[host, input, params]` and draw the
 /// fullscreen triangle into `output`. Shared by every node shape so the render
@@ -32,6 +36,7 @@ pub(super) fn record_fullscreen_pass(
     ctx: &mut FrameContext,
     pipeline: &RenderPipeline,
     params_bg: &BindGroup,
+    signals_bg: Option<&BindGroup>,
     label: &str,
 ) {
     let mut pass = ctx.encoder.begin_render_pass(&RenderPassDescriptor {
@@ -52,6 +57,9 @@ pub(super) fn record_fullscreen_pass(
     pass.set_bind_group(0, ctx.host_bg, &[]); // host context
     pass.set_bind_group(1, ctx.input_bg, &[]); // frame input
     pass.set_bind_group(2, params_bg, &[]); // addon params
+    if let Some(bg) = signals_bg {
+        pass.set_bind_group(3, bg, &[]); // dynamic bindings (signals)
+    }
     pass.draw(0..3, 0..1);
 }
 
@@ -77,7 +85,7 @@ struct ShaderNode {
 
 impl FilterNode for ShaderNode {
     fn process(&self, ctx: &mut FrameContext) {
-        record_fullscreen_pass(ctx, &self.pipeline, &self.params_bg, self.label.as_str());
+        record_fullscreen_pass(ctx, &self.pipeline, &self.params_bg, None, self.label.as_str());
     }
 }
 
@@ -115,6 +123,7 @@ pub(super) fn build_shader_pass(
     label: &str,
     shader_src: &str,
     params_bytes: &[u8],
+    extra_layouts: &[&BindGroupLayout],
 ) -> ShaderPass {
     let params_buf = device.create_buffer_init(&util::BufferInitDescriptor {
         label: Some(label),
@@ -124,14 +133,12 @@ pub(super) fn build_shader_pass(
     let plyt = params_layout(device, label);
     let params_bg = params_bind_group(device, &plyt, &params_buf);
 
+    // Bind group layouts: [host, image, params, <extra (e.g. group3)>].
+    let mut layouts: Vec<&BindGroupLayout> = vec![host_layout, image_layout, &plyt];
+    layouts.extend_from_slice(extra_layouts);
+
     let module = make_module(device, label, shader_src);
-    let pipeline = fullscreen_pipeline(
-        device,
-        label,
-        &module,
-        &[host_layout, image_layout, &plyt],
-        format,
-    );
+    let pipeline = fullscreen_pipeline(device, label, &module, &layouts, format);
 
     ShaderPass {
         pipeline,
@@ -159,6 +166,7 @@ fn build_shader_node_bytes(
         label,
         shader_src,
         params_bytes,
+        &[],
     );
     Box::new(ShaderNode {
         label: label.to_string(),
@@ -168,14 +176,57 @@ fn build_shader_node_bytes(
     })
 }
 
+/// An external addon's node: one fullscreen pass plus, *only if the addon
+/// declares `consume`*, a per-frame `@group(3)` signals uniform it refreshes
+/// each frame. Mirrors the builtin CRT shape so external and builtin signal
+/// consumers run through the identical [`FilterNode`] path.
+struct ExternalShaderNode {
+    label: String,
+    pipeline: RenderPipeline,
+    params_bg: BindGroup,
+    // Kept alive for as long as the bind group references it.
+    _params_buf: Buffer,
+    /// `Some` iff the addon consumes ≥1 signal — then `@group(3)` exists and is
+    /// updated every frame. `None` consumers keep the no-op default `prepare`
+    /// and a pipeline layout byte-identical to a non-consuming addon.
+    signals: Option<SignalsBinding>,
+}
+
+impl FilterNode for ExternalShaderNode {
+    fn prepare(&mut self, queue: &Queue, signals: &SignalSnapshot) {
+        // Pack the consumed signals into @group(3). No rebuild, no new resources.
+        if let Some(binding) = self.signals.as_mut() {
+            binding.update(queue, signals);
+        }
+    }
+
+    fn process(&self, ctx: &mut FrameContext) {
+        record_fullscreen_pass(
+            ctx,
+            &self.pipeline,
+            &self.params_bg,
+            self.signals.as_ref().map(SignalsBinding::bind_group),
+            &self.label,
+        );
+    }
+}
+
 /// Build a node for an **external** addon from a shader loaded off disk.
 ///
 /// This is the generic runner the runtime falls back to when a pipeline addon
-/// has no compiled-in factory: it composes the addon's WGSL with the shared
+/// has no compiled-in factory. It composes the addon's WGSL with the shared
 /// prelude and packs its numeric schema parameters into the `@group(2)` uniform
 /// as a tightly-packed `f32` array, padded to 16-byte alignment. The addon's
 /// shader must declare a matching `@group(2)` struct (its parameters as `f32`
 /// fields, in sorted-key order). Non-numeric params contribute `0.0`.
+///
+/// If the addon's manifest declares `consume = [...]`, the runner also builds
+/// the `@group(3)` signals uniform — exactly as the builtin CRT does — and the
+/// node refreshes it every frame via `prepare`. The shader reads each consumed
+/// signal as a `vec4<f32>` slot in manifest `consume` order. Optional signals
+/// that no behavior publishes resolve to a zero slot (the fallback). An addon
+/// that consumes nothing never gets a `@group(3)`, so its pipeline layout is
+/// unchanged. No path here rebuilds or recompiles on a signal change.
 pub fn external_shader_node(
     device: &Device,
     host_layout: &BindGroupLayout,
@@ -184,6 +235,7 @@ pub fn external_shader_node(
     label: &str,
     shader_src: &str,
     params: &[f32],
+    signals: &SignalContext,
 ) -> Box<dyn FilterNode> {
     // Pad to a multiple of 4 floats (16 bytes) so the uniform satisfies WGSL's
     // alignment rules; never zero-length.
@@ -191,7 +243,14 @@ pub fn external_shader_node(
     while floats.is_empty() || floats.len() % 4 != 0 {
         floats.push(0.0);
     }
-    build_shader_node_bytes(
+
+    // @group(3) only when the addon declares consumed signals. `None` keeps the
+    // layout identical to a non-consuming addon (no extra bind group layout).
+    let slayout = signals_layout(device);
+    let binding = SignalsBinding::new(device, &slayout, signals);
+    let extra: &[&BindGroupLayout] = if binding.is_some() { &[&slayout] } else { &[] };
+
+    let pass = build_shader_pass(
         device,
         host_layout,
         image_layout,
@@ -199,7 +258,15 @@ pub fn external_shader_node(
         label,
         shader_src,
         bytemuck::cast_slice(&floats),
-    )
+        extra,
+    );
+    Box::new(ExternalShaderNode {
+        label: label.to_string(),
+        pipeline: pass.pipeline,
+        params_bg: pass.params_bg,
+        _params_buf: pass.params_buf,
+        signals: binding,
+    })
 }
 
 // ---- manifest construction helpers --------------------------------------
@@ -223,6 +290,8 @@ fn base_manifest(id: &str, name: &str, description: &str) -> Manifest {
         shaders: vec![],
         assets: vec![],
         params: BTreeMap::new(),
+        publish: vec![],
+        consume: vec![],
     }
 }
 

@@ -50,7 +50,12 @@ impl ApplicationHandler for App {
         );
 
         let camera = WebcamCapture::new().expect("failed to open webcam");
-        let engine = pollster::block_on(Engine::new(window.clone(), camera.width, camera.height));
+        let engine = pollster::block_on(Engine::new(
+            window.clone(),
+            camera.width,
+            camera.height,
+            camera.frame_source(),
+        ));
         let ui = Ui::new(&window, engine.device(), engine.surface_format());
 
         self.window = Some(window);

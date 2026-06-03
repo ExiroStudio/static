@@ -22,15 +22,8 @@ pub mod pipeline;
 pub mod registry;
 pub mod schema;
 
-pub use compat::{check_compat, ENGINE_API_VERSION};
+// The unified error/result is the one type used across module boundaries by
+// name; everything else is reached through its own submodule path
+// (`addon::manifest::Manifest`, `addon::pipeline::PipelineConfig`, …) to keep
+// the import sites self-documenting and the facade minimal.
 pub use error::{AddonError, Result};
-pub use manifest::{
-    AddonKind, AssetDecl, FilesystemPerm, GpuPerm, Manifest, NetworkPerm, Permissions, ShaderDecl,
-    CURRENT_MANIFEST_VERSION, MANIFEST_FILENAME,
-};
-pub use pipeline::{
-    NodeConfig, PipelineConfig, PipelineIssue, PipelineIssueKind, SinkConfig, SourceConfig,
-    CURRENT_PIPELINE_FORMAT,
-};
-pub use registry::{AddonEntry, AddonRegistry, RejectedAddon};
-pub use schema::{ParamMap, ParamSpec, ParamValue, UiHints};

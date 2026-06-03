@@ -9,11 +9,17 @@
 pub struct UiState {
     /// Whether the config workspace is shown (NORMAL vs CONFIG mode).
     pub open: bool,
-    /// `instance_id` of the node whose properties are shown, if any.
+    /// `instance_id` of the filter node whose properties are shown, if any.
     pub selected: Option<String>,
+    /// `instance_id` of the behavior whose properties are shown, if any.
+    pub selected_behavior: Option<String>,
+    /// Whether the live Signal Inspector section is expanded.
+    pub inspector_open: bool,
 
-    /// "Add addon" dialog is open.
+    /// "Add filter" dialog is open.
     pub show_add: bool,
+    /// "Add behavior" dialog is open.
+    pub show_add_behavior: bool,
     /// An addon id pending an uninstall confirmation (it is used in the
     /// pipeline). `None` means no confirmation is being asked.
     pub confirm_uninstall: Option<String>,

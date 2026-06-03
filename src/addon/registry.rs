@@ -36,6 +36,7 @@ pub struct AddonEntry {
 /// An addon directory that failed to load or validate. Kept so the UI can
 /// show "addon X failed because Y" instead of silently dropping it.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // fields surfaced via `rejected()` once the UI lists failures
 pub struct RejectedAddon {
     pub root: PathBuf,
     pub reason: String,
@@ -141,32 +142,35 @@ impl AddonRegistry {
         self.entries.get(id)
     }
 
-    pub fn contains(&self, id: &str) -> bool {
-        self.entries.contains_key(id)
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = &AddonEntry> {
         self.entries.values()
     }
 
-    pub fn ids(&self) -> impl Iterator<Item = &str> {
-        self.entries.keys().map(String::as_str)
+    // The accessors below round out the registry's read surface. They are part
+    // of the frozen public shape (used by tests today, and the natural API a
+    // listing/diagnostics UI reaches for); `allow(dead_code)` keeps the build
+    // clean until that UI wiring lands without trimming designed surface.
+
+    #[allow(dead_code)]
+    pub fn contains(&self, id: &str) -> bool {
+        self.entries.contains_key(id)
     }
 
+    /// Addons that failed to load/validate, kept so a UI can show "X failed
+    /// because Y" instead of silently dropping them.
+    #[allow(dead_code)]
     pub fn rejected(&self) -> &[RejectedAddon] {
         &self.rejected
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
-    }
-
-    pub fn engine_api(&self) -> u32 {
-        self.engine_api
     }
 }
 

@@ -9,7 +9,7 @@ use wgpu::*;
 
 use super::{base_manifest, bool_param, build_shader_node, f32_param};
 use crate::addon::manifest::Manifest;
-use crate::runtime::{BuiltinAddon, FilterNode, ResolvedConfig};
+use crate::runtime::{BuiltinAddon, FilterNode, ResolvedConfig, SignalContext};
 
 /// `@group(2)` params block — mirrors `DotParams` in `ascii_dot.wgsl`
 /// (8 × f32 = 32 bytes, 16-byte aligned).
@@ -59,6 +59,7 @@ impl BuiltinAddon for DotRendererAddon {
         image_layout: &BindGroupLayout,
         format: TextureFormat,
         config: &ResolvedConfig,
+        _signals: &SignalContext,
     ) -> Box<dyn FilterNode> {
         let params = DotParams {
             cell_size: config.f32("cell_size"),

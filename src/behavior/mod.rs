@@ -1,62 +1,247 @@
-//! BehaviorRuntime — behaviors run here, off the render thread.
+//! Behavior Runtime — producer addons run here, off the render thread.
 //!
-//! A single dedicated thread owns the behavior loop. It publishes signals to
-//! the shared [`SignalBus`] at its own cadence and never touches the GPU or the
-//! render thread, so a slow behavior can only age a signal — it can never stall
-//! a frame.
+//! A single dedicated thread owns a [`scheduler`] that drives every
+//! [`BehaviorNode`]. Behaviors read the latest CPU frame and publish signals to
+//! the shared [`SignalStore`](crate::signal::SignalStore); they never touch the
+//! GPU and never block rendering. The render thread controls the runtime only
+//! through a [`BehaviorHandle`] (non-blocking command channel + a stop flag).
 //!
-//! Spike scope: one hardcoded behavior that publishes `signal.time = sin(t)` at
-//! ~60 Hz. The general behavior trait, frame access, and config wiring are the
-//! full migration's job; this proves the thread + bus path only.
+//! Spike-era note: the only behavior is [`builtins::time`]. The schema is still
+//! the static `SignalSchema::standard()`; building it from manifests is a later
+//! phase and does not change the contracts here.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+pub mod builtins;
+pub mod node;
+mod scheduler;
+
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crate::signal::{SignalPublisher, SignalSchema, SignalValue};
+use crate::addon::schema::{ParamMap, ParamSpec, ParamValue};
+use crate::camera::FrameSource;
+use crate::signal::{SignalPublisher, SignalSchema, SignalSpec};
 
-/// Owns the behavior thread. Dropping it signals the thread to stop and joins.
-pub struct BehaviorRuntime {
-    running: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
+pub use node::BehaviorNode;
+
+use scheduler::BehaviorScheduler;
+
+/// A constructed-but-not-yet-running behavior: the node plus its config. This
+/// is the unit the engine builds and the [`BehaviorCommand::Reload`] payload.
+pub struct BehaviorInit {
+    pub instance_id: String,
+    pub node: Box<dyn BehaviorNode>,
+    /// Signals this behavior publishes (feeds the schema builder).
+    pub publish: Vec<SignalSpec>,
+    /// Manifest param specs (supply defaults for `ResolvedConfig`).
+    pub specs: BTreeMap<String, ParamSpec>,
+    /// Current config values; `SetParam` mutates these in place.
+    pub values: ParamMap,
+    pub enabled: bool,
 }
 
-impl BehaviorRuntime {
-    /// Spawn the behavior thread, moving the single [`SignalPublisher`] onto it.
-    pub fn spawn(mut publisher: SignalPublisher) -> Self {
-        let running = Arc::new(AtomicBool::new(true));
-        let flag = running.clone();
+/// Control messages sent to the behavior thread. All are applied at the top of
+/// a tick, never mid-update.
+pub enum BehaviorCommand {
+    /// Structural reload: the render thread rebuilt the schema + store, so the
+    /// behavior thread takes the new producer endpoint, the new schema, and the
+    /// new behavior set together (stop old, start new).
+    Reload {
+        publisher: SignalPublisher,
+        schema: Arc<SignalSchema>,
+        behaviors: Vec<BehaviorInit>,
+    },
+    /// Hot config update — does not recreate the instance or its resources.
+    SetParam {
+        instance_id: String,
+        key: String,
+        value: ParamValue,
+    },
+    Enable(String),
+    Disable(String),
+    Shutdown,
+}
 
+/// Spawns the behavior thread. Construction-only; the live thread is owned
+/// through the returned [`BehaviorHandle`].
+pub struct BehaviorRuntime;
+
+impl BehaviorRuntime {
+    /// Start the behavior thread with an initial behavior set. `publisher`,
+    /// `schema`, and `frame` are owned by the thread for its lifetime; only the
+    /// behavior *set* changes (via [`BehaviorCommand::Reload`]).
+    pub fn spawn(
+        publisher: SignalPublisher,
+        schema: Arc<SignalSchema>,
+        frame: FrameSource,
+        initial: Vec<BehaviorInit>,
+    ) -> BehaviorHandle {
+        let running = Arc::new(AtomicBool::new(true));
+        let stats = Arc::new(BehaviorStatsShared::default());
+        let (tx, rx) = mpsc::channel::<BehaviorCommand>();
+
+        let flag = running.clone();
+        let stats_thread = stats.clone();
         let handle = thread::Builder::new()
             .name("behavior".into())
             .spawn(move || {
-                // Resolve the slot once; the loop addresses it by id.
-                let time_id = SignalSchema::standard()
-                    .id("signal.time")
-                    .expect("standard schema includes signal.time");
-                let start = Instant::now();
-                while flag.load(Ordering::Relaxed) {
-                    let t = start.elapsed().as_secs_f32();
-                    publisher.set(time_id, SignalValue::F32(t.sin()));
-                    publisher.publish();
-                    thread::sleep(Duration::from_millis(16));
-                }
+                let sched =
+                    BehaviorScheduler::new(publisher, schema, frame, initial, stats_thread);
+                sched.run(rx, flag);
             })
             .expect("failed to spawn behavior thread");
 
-        Self {
+        BehaviorHandle {
+            tx,
             running,
             handle: Some(handle),
+            stats,
         }
     }
 }
 
-impl Drop for BehaviorRuntime {
+/// The render-thread-side control handle. Every method is a non-blocking
+/// channel send (the render thread never waits on the behavior thread).
+/// Dropping the handle signals shutdown and joins.
+pub struct BehaviorHandle {
+    tx: Sender<BehaviorCommand>,
+    running: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+    stats: Arc<BehaviorStatsShared>,
+}
+
+impl BehaviorHandle {
+    /// Hand the behavior thread a new store endpoint, schema, and behavior set
+    /// (a structural reload). Returns immediately; the render thread never waits.
+    pub fn reload(
+        &self,
+        publisher: SignalPublisher,
+        schema: Arc<SignalSchema>,
+        behaviors: Vec<BehaviorInit>,
+    ) {
+        let _ = self.tx.send(BehaviorCommand::Reload {
+            publisher,
+            schema,
+            behaviors,
+        });
+    }
+
+    pub fn set_param(&self, instance_id: &str, key: &str, value: ParamValue) {
+        let _ = self.tx.send(BehaviorCommand::SetParam {
+            instance_id: instance_id.to_string(),
+            key: key.to_string(),
+            value,
+        });
+    }
+
+    pub fn set_enabled(&self, instance_id: &str, enabled: bool) {
+        let cmd = if enabled {
+            BehaviorCommand::Enable(instance_id.to_string())
+        } else {
+            BehaviorCommand::Disable(instance_id.to_string())
+        };
+        let _ = self.tx.send(cmd);
+    }
+
+    /// A snapshot of the live behavior metrics.
+    pub fn stats(&self) -> BehaviorStats {
+        self.stats.snapshot()
+    }
+}
+
+impl Drop for BehaviorHandle {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
+        let _ = self.tx.send(BehaviorCommand::Shutdown);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+/// Live behavior metrics, snapshotted for the inspector / logs.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BehaviorStats {
+    /// Behavior-thread ticks per second (target ~30).
+    pub fps: f32,
+    /// Wall time of the last tick's `update` pass, in microseconds.
+    pub last_update_us: f32,
+    /// Total publishes since start.
+    #[allow(dead_code)] // surfaced to tests/inspector; not in the render-loop log
+    pub published: u64,
+    /// Number of ticks whose update pass exceeded the 8ms budget.
+    #[allow(dead_code)] // surfaced to tests/inspector; not in the render-loop log
+    pub over_budget: u64,
+}
+
+/// Atomic backing for [`BehaviorStats`]. Writes are a few relaxed stores per
+/// tick on the behavior thread (negligible); the budget *warning* print is
+/// debug-only, so release builds carry no instrumentation I/O.
+#[derive(Default)]
+pub(crate) struct BehaviorStatsShared {
+    fps_bits: AtomicU32,
+    last_update_ns: AtomicU64,
+    published: AtomicU64,
+    over_budget: AtomicU64,
+}
+
+impl BehaviorStatsShared {
+    pub(crate) fn record_tick(&self, update: Duration, published: u64, over_budget: bool) {
+        self.last_update_ns
+            .store(update.as_nanos() as u64, Ordering::Relaxed);
+        self.published.store(published, Ordering::Relaxed);
+        if over_budget {
+            self.over_budget.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn set_fps(&self, fps: f32) {
+        self.fps_bits.store(fps.to_bits(), Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> BehaviorStats {
+        BehaviorStats {
+            fps: f32::from_bits(self.fps_bits.load(Ordering::Relaxed)),
+            last_update_us: self.last_update_ns.load(Ordering::Relaxed) as f32 / 1000.0,
+            published: self.published.load(Ordering::Relaxed),
+            over_budget: self.over_budget.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::signal::{SignalKind, SignalSchema, SignalStore};
+
+    /// End-to-end thread lifecycle: spawn → real publishing → drop joins
+    /// cleanly (no hang). The deterministic per-tick behavior is covered by the
+    /// scheduler unit tests.
+    #[test]
+    fn spawn_publishes_then_shuts_down_cleanly() {
+        let schema = Arc::new(SignalSchema::from_pairs(&[("signal.time", SignalKind::F32)]));
+        let (publisher, reader) = SignalStore::new(&schema);
+        let handle = BehaviorRuntime::spawn(
+            publisher,
+            schema,
+            FrameSource::empty(),
+            vec![builtins::time::init_with("time".into(), Default::default(), true)],
+        );
+
+        // Bounded wait for the 30Hz thread to publish at least once.
+        let mut waited = 0;
+        while reader.published() == 0 && waited < 200 {
+            thread::sleep(Duration::from_millis(5));
+            waited += 1;
+        }
+        assert!(reader.published() > 0, "behavior thread must publish");
+        assert!(handle.stats().published > 0);
+
+        // Dropping the handle signals shutdown and joins; the test simply
+        // returning proves the join did not hang.
+        drop(handle);
     }
 }
