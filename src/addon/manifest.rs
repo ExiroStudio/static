@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -229,21 +229,6 @@ impl Manifest {
         Ok(())
     }
 
-    /// Resolve a declared shader path against the addon's root directory.
-    pub fn shader_path(&self, root: &Path, shader_id: &str) -> Option<PathBuf> {
-        self.shaders
-            .iter()
-            .find(|s| s.id == shader_id)
-            .map(|s| root.join(&s.path))
-    }
-
-    /// Resolve a declared asset path against the addon's root directory.
-    pub fn asset_path(&self, root: &Path, asset_id: &str) -> Option<PathBuf> {
-        self.assets
-            .iter()
-            .find(|a| a.id == asset_id)
-            .map(|a| root.join(&a.path))
-    }
 }
 
 fn is_valid_id(id: &str) -> bool {

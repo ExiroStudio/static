@@ -230,8 +230,9 @@ impl PipelineRuntime {
                     &signals,
                 ),
                 // Otherwise fall back to the generic external-shader runner,
-                // which loads the addon's declared WGSL off disk.
-                None => self.build_external(device, entry, &resolved)?,
+                // which loads the addon's declared WGSL off disk and wires its
+                // declared `consume` signals into `@group(3)` (same as builtins).
+                None => self.build_external(device, entry, &resolved, &signals)?,
             };
             nodes.push(instance);
         }
@@ -256,6 +257,7 @@ impl PipelineRuntime {
         device: &Device,
         entry: &AddonEntry,
         resolved: &ResolvedConfig,
+        signals: &SignalContext,
     ) -> Result<Box<dyn FilterNode>> {
         let shader = entry
             .manifest
@@ -287,6 +289,7 @@ impl PipelineRuntime {
             &entry.manifest.id,
             &src,
             &params,
+            signals,
         ))
     }
 

@@ -99,6 +99,7 @@ pub struct FrameSource {
 impl FrameSource {
     /// An empty source that never yields a frame — for behaviors that don't
     /// read pixels and for tests with no camera.
+    #[allow(dead_code)] // test/utility constructor; the live engine always has a camera source
     pub fn empty() -> Self {
         FrameSource {
             slot: Arc::new(Mutex::new(FrameSlot {

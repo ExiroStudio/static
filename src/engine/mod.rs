@@ -273,11 +273,6 @@ impl Engine {
         self.runtime.has_implementation(addon_id)
     }
 
-    /// Whether `addon_id` is referenced by any node in the current pipeline.
-    pub fn addon_in_use(&self, addon_id: &str) -> bool {
-        self.config.pipeline.iter().any(|n| n.addon == addon_id)
-    }
-
     /// Install an addon from a ZIP package: extract, validate, rescan the
     /// registry, schedule a rebuild. Returns a user-facing message on either
     /// outcome (the live pipeline keeps running regardless).

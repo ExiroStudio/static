@@ -30,23 +30,9 @@ use zip::ZipArchive;
 use super::error::{AddonError, Result};
 use super::manifest::{Manifest, MANIFEST_FILENAME};
 
-pub const PACKAGE_EXTENSION: &str = "zip";
-
-/// Build the canonical filename for an addon package.
-pub fn package_filename(id: &str, version: &str) -> String {
-    format!("{id}-{version}.{PACKAGE_EXTENSION}")
-}
-
 /// Compute the destination directory an addon would extract into.
 pub fn install_path(addons_root: &Path, id: &str) -> PathBuf {
     addons_root.join(id)
-}
-
-/// Read a manifest from an already-extracted addon directory. Convenience
-/// wrapper over [`Manifest::from_dir`] kept here so callers can reach for
-/// "package operations" in one module.
-pub fn manifest_from_dir(dir: &Path) -> Result<Manifest> {
-    Manifest::from_dir(dir)
 }
 
 /// Read and validate the manifest inside a package without extracting the rest.
@@ -133,14 +119,6 @@ pub fn uninstall(addons_root: &Path, id: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn filename_convention() {
-        assert_eq!(
-            package_filename("io.static.crt", "1.0.0"),
-            "io.static.crt-1.0.0.zip"
-        );
-    }
-
     /// Build a minimal valid package zip in `path` with the given manifest body.
     fn write_package(path: &Path, manifest_body: &str, extra: &[(&str, &str)]) {
         use std::io::Write;
@@ -198,7 +176,7 @@ kind = "pipeline"
         assert!(installed.join("manifest.toml").exists());
         assert!(installed.join("shaders/main.wgsl").exists());
         // The installed directory loads as a registry addon.
-        let m = manifest_from_dir(&installed).unwrap();
+        let m = Manifest::from_dir(&installed).unwrap();
         assert_eq!(m.id, "io.test.pkg");
 
         fs::remove_dir_all(&dir).ok();

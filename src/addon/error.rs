@@ -36,9 +36,6 @@ pub enum AddonError {
     #[error("duplicate addon id {0} (already registered)")]
     DuplicateAddon(String),
 
-    #[error("addon not found: {0}")]
-    NotFound(String),
-
     #[error("invalid pipeline config: {0}")]
     InvalidPipeline(String),
 

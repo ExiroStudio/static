@@ -6,6 +6,12 @@
 //! start / filter instantiation. The hot path addresses signals by id — a flat
 //! array index, never a string compare. Ids are stable within a build and may
 //! renumber across builds; never cache one across a rebuild.
+//!
+//! Name resolution itself ([`SignalSchema::id`]) is a hashed lookup into a
+//! `by_name` map built once when the schema is finalized — never a linear scan,
+//! and never an allocation. The map is a pure function of `names`, so it does
+//! not participate in schema equality (two schemas with the same names/kinds
+//! are equal regardless of map iteration order).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,24 +49,47 @@ pub struct SignalRef {
 }
 
 /// A built name/slot/type table. Shared as `Arc<SignalSchema>`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// `by_name` is the resolution index: it makes [`id`](Self::id) a hashed lookup
+/// instead of a linear scan. It is derived entirely from `names`, so it is
+/// excluded from [`PartialEq`]/[`Eq`] (equality is structural over names+kinds).
+#[derive(Clone, Debug, Default)]
 pub struct SignalSchema {
     names: Vec<String>,
     kinds: Vec<SignalKind>,
+    by_name: HashMap<String, SignalId>,
 }
 
+/// Equality is over the observable table (names + kinds). `by_name` is a cache
+/// derived from `names`, so it never affects whether two schemas are "the same"
+/// — this is what lets the reload path compare schemas to decide on a rebuild.
+impl PartialEq for SignalSchema {
+    fn eq(&self, other: &Self) -> bool {
+        self.names == other.names && self.kinds == other.kinds
+    }
+}
+impl Eq for SignalSchema {}
+
 impl SignalSchema {
+    /// Build the `by_name` resolution index from the (final) `names`. Called
+    /// once when a schema is finalized — never on the hot path.
+    fn index_names(names: &[String]) -> HashMap<String, SignalId> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.clone(), SignalId(i as u16)))
+            .collect()
+    }
+
     /// Number of slots — the length of every signal frame and snapshot.
     pub fn len(&self) -> usize {
         self.names.len()
     }
 
-    /// Resolve a name to its slot. Call once, off the hot path.
+    /// Resolve a name to its slot via the build-time index — a hashed lookup,
+    /// no allocation, no linear scan. Call once, off the hot path.
     pub fn id(&self, name: &str) -> Option<SignalId> {
-        self.names
-            .iter()
-            .position(|n| n == name)
-            .map(|i| SignalId(i as u16))
+        self.by_name.get(name).copied()
     }
 
     pub fn name(&self, id: SignalId) -> &str {
@@ -90,9 +119,12 @@ impl SignalSchema {
     /// tests (production schemas come from [`SignalSchemaBuilder`]).
     #[cfg(test)]
     pub fn from_pairs(pairs: &[(&str, SignalKind)]) -> SignalSchema {
+        let names: Vec<String> = pairs.iter().map(|(n, _)| (*n).to_string()).collect();
+        let by_name = Self::index_names(&names);
         SignalSchema {
-            names: pairs.iter().map(|(n, _)| (*n).to_string()).collect(),
+            names,
             kinds: pairs.iter().map(|(_, k)| *k).collect(),
+            by_name,
         }
     }
 }
@@ -192,10 +224,14 @@ impl SignalSchemaBuilder {
 
     /// Finish, returning the shared schema and any non-fatal warnings.
     pub fn finish(self) -> (Arc<SignalSchema>, Vec<String>) {
+        // The builder already keyed names → slot in `by_name` (as `usize`);
+        // re-key into the schema's `SignalId` index once, at finalization.
+        let by_name = SignalSchema::index_names(&self.names);
         (
             Arc::new(SignalSchema {
                 names: self.names,
                 kinds: self.kinds,
+                by_name,
             }),
             self.warnings,
         )
@@ -271,5 +307,43 @@ mod tests {
         assert_eq!(s.id("b").unwrap().index(), 1);
         assert_eq!(s.kind(s.id("b").unwrap()), SignalKind::Vec3);
         assert!(s.id("missing").is_none());
+    }
+
+    #[test]
+    fn id_lookup_matches_slot_order_via_index() {
+        // The build-time `by_name` index must agree with positional order for
+        // every name, and report `None` for unknown names (no scan, no panic).
+        let mut b = SignalSchemaBuilder::new();
+        for (i, n) in ["a", "b", "c", "d"].iter().enumerate() {
+            b.publish(&spec(n, SignalKind::F32)).unwrap();
+            let (s, _) = {
+                let mut bb = SignalSchemaBuilder::new();
+                bb.publish_all(
+                    &["a", "b", "c", "d"][..=i]
+                        .iter()
+                        .map(|n| spec(n, SignalKind::F32))
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+                bb.finish()
+            };
+            assert_eq!(s.id(n).unwrap().index(), i);
+        }
+        let (s, _) = b.finish();
+        assert_eq!(s.id("a").unwrap().index(), 0);
+        assert_eq!(s.id("d").unwrap().index(), 3);
+        assert!(s.id("nope").is_none());
+    }
+
+    #[test]
+    fn equality_ignores_the_resolution_index() {
+        // Two schemas built independently with the same names+kinds compare
+        // equal — the `by_name` cache must not perturb equality (the reload
+        // path relies on this to decide whether a rebuild is structural).
+        let a = SignalSchema::from_pairs(&[("x", SignalKind::F32), ("y", SignalKind::Vec2)]);
+        let b = SignalSchema::from_pairs(&[("x", SignalKind::F32), ("y", SignalKind::Vec2)]);
+        assert_eq!(a, b);
+        let c = SignalSchema::from_pairs(&[("x", SignalKind::F32)]);
+        assert_ne!(a, c);
     }
 }

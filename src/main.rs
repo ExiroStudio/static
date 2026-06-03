@@ -17,6 +17,9 @@ mod runtime;
 mod signal;
 mod ui;
 
+#[cfg(test)]
+mod smoke;
+
 use winit::event_loop::{ControlFlow, EventLoop};
 
 use crate::app::App;

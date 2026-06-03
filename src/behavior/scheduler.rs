@@ -201,16 +201,7 @@ impl BehaviorScheduler {
                 publisher,
                 schema,
                 behaviors,
-            } => {
-                // A structural reload swaps in the new store endpoint and schema
-                // (the render thread recreated them) along with the new set.
-                self.stop_all();
-                self.publisher = publisher;
-                self.schema = schema;
-                self.slots = behaviors.into_iter().map(Slot::from_init).collect();
-                self.frame_buf.clear();
-                self.start_all();
-            }
+            } => self.reload(publisher, schema, behaviors),
             BehaviorCommand::SetParam {
                 instance_id,
                 key,
@@ -232,13 +223,87 @@ impl BehaviorScheduler {
             slot.enabled = enabled;
         }
     }
+
+    /// Apply a structural reload as a **minimal diff** against the running set.
+    ///
+    /// The render thread recreates the store + schema only when the published
+    /// signal set changes; this is where the behavior thread reconciles. The
+    /// schema builder assigns ids in publish order, so adding a behavior appends
+    /// slots and leaves earlier ids fixed — which lets unchanged behaviors keep
+    /// running untouched. For each incoming init:
+    ///
+    /// * **Reuse in place** — a live instance with the same id whose published
+    ///   signals all resolve to the *same* [`SignalId`] under the new schema. Its
+    ///   `start`-cached ids are still valid, so we keep the instance and its
+    ///   loaded resources and only refresh its hot config. No stop/start.
+    /// * **Per-instance full reload** (the fallback) — a matching id whose ids
+    ///   moved, or a brand-new id: stop the old instance (if any) and construct
+    ///   the fresh one from the init. `start` runs for it below.
+    ///
+    /// Instances dropped from the set are stopped. Reused instances never have
+    /// their resources released — that is the property this diff preserves.
+    fn reload(
+        &mut self,
+        publisher: SignalPublisher,
+        new_schema: Schema,
+        behaviors: Vec<BehaviorInit>,
+    ) {
+        let old_schema = self.schema.clone();
+        let mut old_slots: Vec<Slot> = std::mem::take(&mut self.slots);
+        let mut next: Vec<Slot> = Vec::with_capacity(behaviors.len());
+
+        for init in behaviors {
+            if let Some(pos) = old_slots
+                .iter()
+                .position(|s| s.instance_id == init.instance_id)
+            {
+                let mut existing = old_slots.remove(pos);
+                // Safe to keep the live instance only if every signal it
+                // publishes maps to the same id under the new schema — else its
+                // `start`-cached ids would be stale.
+                let ids_stable = existing.started
+                    && init
+                        .publish
+                        .iter()
+                        .all(|s| old_schema.id(&s.name) == new_schema.id(&s.name));
+                if ids_stable {
+                    // Reuse: refresh only the hot config; resources untouched.
+                    existing.specs = init.specs;
+                    existing.values = init.values;
+                    existing.enabled = init.enabled;
+                    next.push(existing);
+                    continue;
+                }
+                // Ids moved (or it never started): release and rebuild it.
+                existing.node.stop();
+            }
+            next.push(Slot::from_init(init));
+        }
+
+        // Behaviors removed from the set: stop their instances.
+        for mut leftover in old_slots {
+            if leftover.started {
+                leftover.node.stop();
+            }
+        }
+
+        self.publisher = publisher;
+        self.schema = new_schema;
+        self.slots = next;
+        self.frame_buf.clear();
+        // Starts only the not-yet-started slots (new + rebuilt); reused slots
+        // keep their `started` flag and are left running.
+        self.start_all();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::addon::schema::{ParamValue, UiHints};
-    use crate::signal::{SignalId, SignalKind, SignalReader, SignalStore, SignalValue};
+    use crate::signal::{
+        SignalId, SignalKind, SignalReader, SignalSpec, SignalStore, SignalValue,
+    };
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     // ---- a probe behavior that records lifecycle calls and publishes a
@@ -403,6 +468,80 @@ mod tests {
             "new behavior publishes into the new store after reload"
         );
         assert_eq!(b.updates.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn reload_reuses_unchanged_instance_in_place() {
+        // Start with "a". Reload keeping "a" (new config) and adding "b". The
+        // probe publishes nothing, so "a"'s ids are trivially stable → "a" is
+        // reused in place: never stopped, never re-started, just kept running.
+        let (init_a, a) = probe_init("a", 1.0, false);
+        let (mut sched, _r) = make(vec![init_a]);
+        sched.start_all();
+        let updates_before = a.updates.load(Ordering::Relaxed);
+
+        let schema = test_schema();
+        let (publisher, _reader) = SignalStore::new(&schema);
+        let (mut init_a2, _a2) = probe_init("a", 7.0, false);
+        init_a2.instance_id = "a".into();
+        let (init_b, b) = probe_init("b", 2.0, false);
+        sched.apply(BehaviorCommand::Reload {
+            publisher,
+            schema,
+            behaviors: vec![init_a2, init_b],
+        });
+
+        assert!(
+            !a.stopped.load(Ordering::Relaxed),
+            "a reused in place must NOT be stopped"
+        );
+        assert!(b.started.load(Ordering::Relaxed), "new instance b must start");
+
+        sched.tick();
+        assert!(
+            a.updates.load(Ordering::Relaxed) > updates_before,
+            "reused instance keeps ticking"
+        );
+    }
+
+    #[test]
+    fn reload_rebuilds_instance_when_ids_shift() {
+        // "a" publishes signal.time. Reload with a schema that prepends another
+        // signal, shifting signal.time's id 0 → 1. "a"'s cached id is now stale,
+        // so the reload must release the old instance and build a fresh one.
+        let (mut init_a, a) = probe_init("a", 1.0, false);
+        init_a.publish = vec![SignalSpec {
+            name: "signal.time".into(),
+            kind: SignalKind::F32,
+        }];
+        let (mut sched, _r) = make(vec![init_a]);
+        sched.start_all();
+
+        let shifted = Arc::new(SignalSchema::from_pairs(&[
+            ("other", SignalKind::F32),
+            ("signal.time", SignalKind::F32),
+        ]));
+        let (publisher, _reader) = SignalStore::new(&shifted);
+        let (mut init_a2, a2) = probe_init("a", 1.0, false);
+        init_a2.instance_id = "a".into();
+        init_a2.publish = vec![SignalSpec {
+            name: "signal.time".into(),
+            kind: SignalKind::F32,
+        }];
+        sched.apply(BehaviorCommand::Reload {
+            publisher,
+            schema: shifted,
+            behaviors: vec![init_a2],
+        });
+
+        assert!(
+            a.stopped.load(Ordering::Relaxed),
+            "stale-id instance must be stopped (released)"
+        );
+        assert!(
+            a2.started.load(Ordering::Relaxed),
+            "the rebuilt instance must be started"
+        );
     }
 
     #[test]
