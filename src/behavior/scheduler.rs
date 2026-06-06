@@ -201,7 +201,13 @@ impl BehaviorScheduler {
                 publisher,
                 schema,
                 behaviors,
-            } => self.reload(publisher, schema, behaviors),
+                sync,
+            } => {
+                self.reload(publisher, schema, behaviors);
+                if let Some(s) = sync {
+                    let _ = s.send(());
+                }
+            }
             BehaviorCommand::SetParam {
                 instance_id,
                 key,
@@ -457,6 +463,7 @@ mod tests {
             publisher: publisher_b,
             schema,
             behaviors: vec![init_b],
+            sync: None,
         });
         assert!(a.stopped.load(Ordering::Relaxed), "reload must stop the old set");
         assert!(b.started.load(Ordering::Relaxed), "reload must start the new set");
@@ -489,6 +496,7 @@ mod tests {
             publisher,
             schema,
             behaviors: vec![init_a2, init_b],
+            sync: None,
         });
 
         assert!(
@@ -532,6 +540,7 @@ mod tests {
             publisher,
             schema: shifted,
             behaviors: vec![init_a2],
+            sync: None,
         });
 
         assert!(

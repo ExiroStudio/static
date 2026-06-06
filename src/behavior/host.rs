@@ -75,11 +75,13 @@ impl BehaviorHost {
     pub fn create_inits(
         registry: &BehaviorRegistry,
         behaviors: &[NodeConfig],
-    ) -> Vec<BehaviorInit> {
-        behaviors
-            .iter()
-            .filter_map(|node| match registry.get(&node.addon) {
-                Some(make) => Some(make(
+    ) -> (Vec<BehaviorInit>, Vec<(String, super::SkipReason)>) {
+        let mut inits = Vec::new();
+        let mut skipped = Vec::new();
+
+        for node in behaviors {
+            match registry.get(&node.addon) {
+                Some(make) => inits.push(make(
                     node.instance_id.clone(),
                     node.config.clone(),
                     node.enabled,
@@ -89,10 +91,11 @@ impl BehaviorHost {
                         "[engine] behavior addon {:?} has no registered factory — skipped",
                         node.addon
                     );
-                    None
+                    skipped.push((node.addon.clone(), super::SkipReason::FilesystemMissing));
                 }
-            })
-            .collect()
+            }
+        }
+        (inits, skipped)
     }
 }
 
@@ -154,9 +157,11 @@ mod tests {
 
         // Two entries: one registered, one not. Only the registered one executes.
         let behaviors = vec![node("noop", "a"), node("unregistered", "b")];
-        let inits = BehaviorHost::create_inits(&reg, &behaviors);
+        let (inits, skipped) = BehaviorHost::create_inits(&reg, &behaviors);
 
         assert_eq!(inits.len(), 1, "unregistered behavior is skipped, not faked");
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].1, super::SkipReason::FilesystemMissing);
         assert_eq!(inits[0].instance_id, "a");
         assert_eq!(inits[0].publish.len(), 1);
         assert_eq!(inits[0].publish[0].name, "noop.signal");
@@ -168,7 +173,7 @@ mod tests {
         reg.register("noop", make_noop);
         let mut n = node("noop", "x");
         n.enabled = false;
-        let inits = BehaviorHost::create_inits(&reg, &[n]);
+        let (inits, _) = BehaviorHost::create_inits(&reg, &[n]);
         assert_eq!(inits.len(), 1);
         assert!(!inits[0].enabled, "disabled flag flows through the factory");
     }

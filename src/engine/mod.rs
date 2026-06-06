@@ -51,8 +51,6 @@ const PIPELINE_PATH: &str = "pipeline.json";
 const ADDONS_ROOT: &str = "addons";
 
 pub struct Engine {
-    gpu: GpuContext,
-
     /// The webcam source: frames stream into this texture every frame.
     video: VideoTexture,
 
@@ -89,10 +87,20 @@ pub struct Engine {
     frames: u32,
     last_stat: Instant,
     last_pubs: u64,
+    /// Explicit epoch tracked for signal metrics. Incremented on every
+    /// structural reload (SignalStore swap). Prevents implicit reset logic
+    /// from misinterpreting a standard counter overflow as a reload.
+    metric_epoch: u64,
+    last_metric_epoch: u64,
     cur_fps: f32,
     cur_signal_hz: f32,
     /// Pending debounced config save for hot (non-rebuild) behavior edits.
     save_at: Option<Instant>,
+
+    /// The GPU context. Moved to the bottom of the struct to ensure it is the
+    /// LAST field dropped during unwinding/destruction, avoiding Surface
+    /// teardown while stack-resident SurfaceTextures are still alive.
+    gpu: GpuContext,
 }
 
 /// Debounce for persisting hot behavior edits (matches the reload debounce).
@@ -200,6 +208,8 @@ impl Engine {
             frames: 0,
             last_stat: Instant::now(),
             last_pubs: 0,
+            metric_epoch: 0,
+            last_metric_epoch: 0,
             cur_fps: 0.0,
             cur_signal_hz: 0.0,
             save_at: None,
@@ -310,11 +320,21 @@ impl Engine {
     /// Uninstall an addon: first remove any pipeline nodes using it (so the
     /// pipeline never silently breaks), then delete its directory and rescan.
     pub fn uninstall_addon(&mut self, addon_id: &str) -> std::result::Result<String, String> {
+        // Step 1: Stop any nodes or behaviors using this addon.
         self.config.pipeline.retain(|n| n.addon != addon_id);
+        self.config.behaviors.retain(|b| b.addon != addon_id);
+
+        // Step 2: Synchronous rebuild. This tells the behavior thread to stop the
+        // worker and the render thread to drop the nodes. No new frames will touch
+        // the addon's assets after this.
+        self.rebuild(true)?;
+
+        // Step 3: Delete files only after execution has been safely drained.
         match package::uninstall(Path::new(ADDONS_ROOT), addon_id)
             .and_then(|()| self.runtime.rescan_addons(Path::new(ADDONS_ROOT)))
         {
             Ok(()) => {
+                // Mark dirty just in case, though the sync rebuild already applied changes.
                 self.reload.mark_dirty_now();
                 Ok(format!("Uninstalled “{addon_id}”."))
             }
@@ -329,7 +349,7 @@ impl Engine {
     pub fn tick_reload(&mut self) {
         if self.reload.take_if_settled() {
             let t0 = Instant::now();
-            match self.rebuild() {
+            match self.rebuild(false) {
                 Ok(()) => {
                     self.last_reload_ms = t0.elapsed().as_secs_f32() * 1000.0;
                     self.reload.set_error(None);
@@ -361,8 +381,8 @@ impl Engine {
     /// behavior thread are only re-created when the schema's *signals* change
     /// (i.e. a behavior was added/removed) — filter edits and behavior
     /// enable/param edits leave them running. On any error nothing is swapped.
-    fn rebuild(&mut self) -> std::result::Result<(), String> {
-        let inits =
+    fn rebuild(&mut self, sync: bool) -> std::result::Result<(), String> {
+        let (inits, _skipped) =
             BehaviorHost::create_inits(self.runtime.behavior_registry(), &self.config.behaviors);
         let (schema, warnings) =
             build_schema(&inits, &self.config, self.runtime.registry()).map_err(|e| e.to_string())?;
@@ -382,7 +402,10 @@ impl Engine {
             self.schema = schema.clone();
             self.reader = reader;
             self.signals = self.reader.snapshot();
-            self.behavior.reload(publisher, schema, inits);
+            self.last_pubs = 0;
+            self.metric_epoch += 1;
+            self.behavior.reload(publisher, schema, inits, sync)
+                .map_err(|e| e.to_string())?;
         } else {
             self.runtime
                 .build(&self.gpu.device, &self.config, &self.schema)
@@ -507,7 +530,13 @@ impl Engine {
         }
         let pubs = self.reader.published();
         self.cur_fps = self.frames as f32 / dt;
-        self.cur_signal_hz = (pubs - self.last_pubs) as f32 / dt;
+        if self.metric_epoch == self.last_metric_epoch && pubs >= self.last_pubs {
+            self.cur_signal_hz = (pubs - self.last_pubs) as f32 / dt;
+        } else {
+            // Signal store was swapped OR counter wrapped; use absolute for this frame.
+            self.cur_signal_hz = pubs as f32 / dt;
+            self.last_metric_epoch = self.metric_epoch;
+        }
 
         // Diagnostics print is debug-only — release builds carry no logging I/O.
         #[cfg(debug_assertions)]

@@ -48,6 +48,15 @@ pub struct BehaviorInit {
     pub enabled: bool,
 }
 
+/// Why an addon was skipped during instantiation (R3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SkipReason {
+    FilesystemMissing,
+    ManualUninstall,
+    TrustRevoked,
+    LoadFailed(String),
+}
+
 /// Control messages sent to the behavior thread. All are applied at the top of
 /// a tick, never mid-update.
 pub enum BehaviorCommand {
@@ -58,6 +67,9 @@ pub enum BehaviorCommand {
         publisher: SignalPublisher,
         schema: Arc<SignalSchema>,
         behaviors: Vec<BehaviorInit>,
+        /// Optional sync barrier: if provided, the behavior thread signals this
+        /// after the reload is applied.
+        sync: Option<mpsc::SyncSender<()>>,
     },
     /// Hot config update — does not recreate the instance or its resources.
     SetParam {
@@ -120,18 +132,43 @@ pub struct BehaviorHandle {
 
 impl BehaviorHandle {
     /// Hand the behavior thread a new store endpoint, schema, and behavior set
-    /// (a structural reload). Returns immediately; the render thread never waits.
+    /// (a structural reload).
+    ///
+    /// If `sync` is true, this waits up to 100ms for the behavior thread to
+    /// acknowledge and apply the reload.
     pub fn reload(
         &self,
         publisher: SignalPublisher,
         schema: Arc<SignalSchema>,
         behaviors: Vec<BehaviorInit>,
-    ) {
-        let _ = self.tx.send(BehaviorCommand::Reload {
-            publisher,
-            schema,
-            behaviors,
-        });
+        sync: bool,
+    ) -> std::result::Result<(), String> {
+        let (tx, rx) = if sync {
+            let (tx, rx) = mpsc::sync_channel(1);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
+        self.tx
+            .send(BehaviorCommand::Reload {
+                publisher,
+                schema,
+                behaviors,
+                sync: tx,
+            })
+            .map_err(|e| format!("failed to send reload: {e}"))?;
+
+        if let Some(rx) = rx {
+            // Wait for the behavior thread to apply the reload. 100ms is enough
+            // for ~3 behavior ticks; if it takes longer, the worker is likely
+            // stalled (R2).
+            if rx.recv_timeout(Duration::from_millis(100)).is_err() {
+                return Err("behavior reload timeout (worker stalled)".to_string());
+            }
+        }
+
+        Ok(())
     }
 
     pub fn set_param(&self, instance_id: &str, key: &str, value: ParamValue) {
