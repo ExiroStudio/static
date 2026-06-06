@@ -34,7 +34,7 @@ use crate::behavior::{BehaviorFactory, BehaviorRegistry};
 use crate::engine::image::ImageBinding;
 
 pub use context::{
-    params_bind_group, params_layout, BuiltinAddon, FilterNode, FrameContext, NodeFactory,
+    params_bind_group, params_layout, FilterNode, FrameContext, NodeFactory,
     ResolvedConfig, SignalContext,
 };
 pub use signals_group::{signals_layout, SignalsBinding};
@@ -118,31 +118,6 @@ impl PipelineRuntime {
             nodes: Vec::new(),
             build_count: 0,
         }
-    }
-
-    /// Register a builtin addon: its manifest goes into the registry (validated
-    /// and compatibility-checked like any addon) and its factory into the
-    /// instantiation table. After this, the addon is indistinguishable from an
-    /// externally installed one as far as validation and execution are
-    /// concerned.
-    pub fn register_builtin<A: BuiltinAddon>(&mut self) -> Result<()> {
-        let manifest = A::manifest();
-        let id = manifest.id.clone();
-        self.builtin_manifests.push(manifest.clone());
-        self.registry.register_builtin(manifest)?;
-        self.factories.insert(id, A::instantiate as NodeFactory);
-        Ok(())
-    }
-
-    /// Register a behavior addon by manifest only — it appears in the registry
-    /// (for UI listing + schema validation) but has **no factory**, so it is not
-    /// executable (a reference/non-executable producer). Kept as the manifest-only
-    /// half of the seam; [`register_behavior_with`](Self::register_behavior_with)
-    /// is the executable path.
-    #[allow(dead_code)] // retained API surface; executable behaviors use `_with`
-    pub fn register_behavior(&mut self, manifest: Manifest) -> Result<()> {
-        self.behavior_manifests.push(manifest.clone());
-        self.registry.register_builtin(manifest)
     }
 
     /// Register an **executable** behavior addon: bind a [`BehaviorFactory`] to

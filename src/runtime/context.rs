@@ -13,7 +13,6 @@ use std::collections::BTreeMap;
 
 use wgpu::*;
 
-use crate::addon::manifest::Manifest;
 use crate::addon::schema::{ParamMap, ParamSpec, ParamValue};
 use crate::signal::{SignalId, SignalRef, SignalSchema, SignalSnapshot};
 
@@ -84,24 +83,7 @@ pub trait FilterNode {
 /// An addon that ships inside the engine binary. It exposes the same two things
 /// an external addon would: a manifest (identity + params + compatibility) and
 /// a way to instantiate a node from resolved config.
-pub trait BuiltinAddon {
-    /// The addon's manifest — registered into the [`AddonRegistry`] verbatim.
-    fn manifest() -> Manifest;
-
-    /// Build a live node. `host_layout` and `image_layout` are the runtime's
-    /// `@group(0)`/`@group(1)` layouts; `format` is the render-target format;
-    /// `config` resolves manifest defaults against the node's pipeline config.
-    fn instantiate(
-        device: &Device,
-        host_layout: &BindGroupLayout,
-        image_layout: &BindGroupLayout,
-        format: TextureFormat,
-        config: &ResolvedConfig,
-        signals: &SignalContext,
-    ) -> Box<dyn FilterNode>;
-}
-
-/// Function-pointer form of [`BuiltinAddon::instantiate`], stored per addon id.
+/// Function-pointer form of [`NodeFactory`], stored per addon id.
 pub type NodeFactory = fn(
     &Device,
     &BindGroupLayout,

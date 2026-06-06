@@ -10,4 +10,4 @@
 //! executable code is compiled in (v1 loads no scripting/native/wasm). Adding one
 //! never edits the engine's dispatch.
 
-pub mod face_tracking_lite;
+// (Empty. Addon behaviors moved to external packages).

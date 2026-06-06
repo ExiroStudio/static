@@ -31,8 +31,7 @@ use crate::addon::package;
 use crate::addon::pipeline::{PipelineConfig, SinkConfig, SourceConfig};
 use crate::addon::registry::AddonRegistry;
 use crate::addon::schema::ParamValue;
-use crate::addons::{CrtAddon, DotRendererAddon};
-use crate::behavior::{addons, builtins, BehaviorHandle, BehaviorHost, BehaviorInit, BehaviorRuntime};
+use crate::behavior::{BehaviorHandle, BehaviorHost, BehaviorInit, BehaviorRuntime};
 use crate::camera::{FrameSource, WebcamCapture};
 use crate::runtime::{PipelineRuntime, SINK_WINDOW, SOURCE_WEBCAM};
 use crate::signal::{
@@ -136,15 +135,6 @@ impl Engine {
             gpu.config.height,
         );
 
-        // Register builtin addons through the same path an external addon would
-        // use. The runtime does not know what these *are* — only that they exist.
-        runtime
-            .register_builtin::<DotRendererAddon>()
-            .expect("register dot-renderer");
-        runtime
-            .register_builtin::<CrtAddon>()
-            .expect("register crt");
-
         // The webcam is the source; hand its view to the runtime.
         runtime.set_source(&gpu.device, &video.view);
 
@@ -156,32 +146,39 @@ impl Engine {
             eprintln!("[engine] addon scan failed: {e}");
         }
 
-        // Register executable behaviors through the host seam — a registry
-        // lookup, never a per-addon dispatch arm. `time` is the legacy reference
-        // producer; `face-tracking-lite` is the first external behavior package.
-        runtime
-            .register_behavior_with(builtins::time::manifest(), builtins::time::init_with)
-            .expect("register time behavior");
-        runtime
-            .register_behavior_with(
-                addons::face_tracking_lite::manifest(),
-                addons::face_tracking_lite::init_with,
-            )
-            .expect("register face-tracking-lite behavior");
 
-        let config = load_pipeline_config();
+        let mut config = load_pipeline_config();
+
+        // [R3] Robustness: filter out any reference to an addon that doesn't exist
+        // in the registry. This prevents startup panics when an addon is uninstalled.
+        if Self::clean_config(&mut config, &runtime) {
+            println!("[engine] pipeline.json contained missing addons; cleaning...");
+            let _ = config.save(Path::new(PIPELINE_PATH));
+        }
 
         // Build the schema from the config's behaviors (publish) + filters
         // (consume), then the store + filters — all before the first frame.
-        let inits = BehaviorHost::create_inits(runtime.behavior_registry(), &config.behaviors);
+        let (inits, skipped) = BehaviorHost::create_inits(runtime.behavior_registry(), &config.behaviors);
+        for (id, reason) in skipped {
+            eprintln!("[engine] behavior addon {id:?} skipped: {reason:?}");
+        }
+
         let (schema, warnings) = build_schema(&inits, &config, runtime.registry())
-            .expect("initial pipeline schema is invalid");
+            .unwrap_or_else(|e| {
+                eprintln!("[engine] schema build failed: {e}. Falling back to empty schema.");
+                (Arc::new(SignalSchema::default()), vec![])
+            });
+
         for w in &warnings {
             eprintln!("[engine] {w}");
         }
-        runtime
-            .build(&gpu.device, &config, &schema)
-            .expect("failed to build pipeline from pipeline.json");
+
+        if let Err(e) = runtime.build(&gpu.device, &config, &schema) {
+            eprintln!("[engine] failed to build pipeline: {e}. Running with empty pipeline.");
+            // Fallback: build an empty pipeline config to at least start the window.
+            let fallback = PipelineConfig::new(config.source.clone(), config.sink.clone());
+            let _ = runtime.build(&gpu.device, &fallback, &schema);
+        }
 
         // Signal store + behavior thread. The behavior thread publishes;
         // the filters consume. They share only the store.
@@ -382,10 +379,26 @@ impl Engine {
     /// (i.e. a behavior was added/removed) — filter edits and behavior
     /// enable/param edits leave them running. On any error nothing is swapped.
     fn rebuild(&mut self, sync: bool) -> std::result::Result<(), String> {
-        let (inits, _skipped) =
+        // Filter out any nodes that no longer exist in the registry (e.g. uninstalled).
+        if Self::clean_config(&mut self.config, &self.runtime) {
+            println!("[engine] cleaning uninstalled addons from config...");
+            let _ = self.config.save(Path::new(PIPELINE_PATH));
+        }
+
+        let (inits, skipped) =
             BehaviorHost::create_inits(self.runtime.behavior_registry(), &self.config.behaviors);
+        for (id, reason) in skipped {
+            eprintln!("[engine] behavior addon {id:?} skipped: {reason:?}");
+        }
+
         let (schema, warnings) =
-            build_schema(&inits, &self.config, self.runtime.registry()).map_err(|e| e.to_string())?;
+            match build_schema(&inits, &self.config, self.runtime.registry()) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[engine] rebuild schema error: {e}");
+                    return Err(e.to_string());
+                }
+            };
         for w in &warnings {
             eprintln!("[engine] {w}");
         }
@@ -580,10 +593,9 @@ fn load_pipeline_config() -> PipelineConfig {
     default_pipeline()
 }
 
-/// The default pipeline: webcam → dot-renderer → crt → window, with the `time`
-/// behavior publishing `signal.time` (which CRT consumes).
+/// The default pipeline: empty chain.
 fn default_pipeline() -> PipelineConfig {
-    let mut config = PipelineConfig::new(
+    PipelineConfig::new(
         SourceConfig {
             kind: SOURCE_WEBCAM.into(),
             config: serde_json::Value::Object(Default::default()),
@@ -592,11 +604,35 @@ fn default_pipeline() -> PipelineConfig {
             kind: SINK_WINDOW.into(),
             config: serde_json::Value::Object(Default::default()),
         },
-    );
-    config.add_node("dot-renderer", None);
-    config.add_node("crt", None);
-    config.add_behavior("time");
-    config
+    )
+}
+
+impl Engine {
+    /// Remove any nodes (behaviors or filters) whose addon ID is not present in
+    /// the registry. Returns true if anything was removed.
+    fn clean_config(config: &mut PipelineConfig, runtime: &PipelineRuntime) -> bool {
+        let mut dirty = false;
+
+        // Clean behaviors
+        let b_len = config.behaviors.len();
+        config.behaviors.retain(|node| {
+            runtime.behavior_registry().get(&node.addon).is_some()
+        });
+        if config.behaviors.len() != b_len {
+            dirty = true;
+        }
+
+        // Clean filters
+        let p_len = config.pipeline.len();
+        config.pipeline.retain(|node| {
+            runtime.registry().get(&node.addon).is_some()
+        });
+        if config.pipeline.len() != p_len {
+            dirty = true;
+        }
+
+        dirty
+    }
 }
 
 /// Build the signal schema: every behavior's published signals (so the schema

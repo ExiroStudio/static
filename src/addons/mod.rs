@@ -9,19 +9,10 @@
 //! [`Manifest`]: crate::addon::manifest::Manifest
 //! [`FilterNode`]: crate::runtime::FilterNode
 
-mod crt;
-mod dot_renderer;
-
-pub use crt::CrtAddon;
-pub use dot_renderer::DotRendererAddon;
-
-use std::collections::BTreeMap;
+// (Empty. Builtin filters moved to external addons or removed).
 
 use wgpu::util::DeviceExt;
 use wgpu::*;
-
-use crate::addon::manifest::{AddonKind, Manifest, CURRENT_MANIFEST_VERSION};
-use crate::addon::schema::{ParamSpec, UiHints};
 use crate::effects::{fullscreen_pipeline, make_module};
 use crate::runtime::{
     params_bind_group, params_layout, signals_layout, FilterNode, FrameContext, SignalContext,
@@ -72,45 +63,6 @@ pub(super) struct ShaderPass {
     pub params_buf: Buffer,
 }
 
-/// The shared shape of a builtin addon node: one fullscreen pass with a params
-/// uniform at `@group(2)`. DotRenderer and CRT differ only in their shader and
-/// the bytes of that uniform, so the GPU plumbing lives here once.
-struct ShaderNode {
-    label: String,
-    pipeline: RenderPipeline,
-    params_bg: BindGroup,
-    // Kept alive for as long as the bind group references it.
-    _params_buf: Buffer,
-}
-
-impl FilterNode for ShaderNode {
-    fn process(&self, ctx: &mut FrameContext) {
-        record_fullscreen_pass(ctx, &self.pipeline, &self.params_bg, None, self.label.as_str());
-    }
-}
-
-/// Build a single-pass shader node from a typed params struct (used by the
-/// builtins, whose layout is known at compile time).
-fn build_shader_node<P: bytemuck::Pod>(
-    device: &Device,
-    host_layout: &BindGroupLayout,
-    image_layout: &BindGroupLayout,
-    format: TextureFormat,
-    label: &'static str,
-    shader_src: &str,
-    params: P,
-) -> Box<dyn FilterNode> {
-    build_shader_node_bytes(
-        device,
-        host_layout,
-        image_layout,
-        format,
-        label,
-        shader_src,
-        bytemuck::bytes_of(&params),
-    )
-}
-
 /// Build the GPU pieces of a fullscreen shader pass: upload `params_bytes` to a
 /// `@group(2)` uniform, compose `shader_src` with the shared prelude, and build
 /// the pipeline bound as `[host, image, params]`. The params buffer is returned
@@ -147,34 +99,6 @@ pub(super) fn build_shader_pass(
     }
 }
 
-/// Core node builder for nodes with no per-frame updates: wraps a
-/// [`build_shader_pass`] result in a plain [`ShaderNode`].
-fn build_shader_node_bytes(
-    device: &Device,
-    host_layout: &BindGroupLayout,
-    image_layout: &BindGroupLayout,
-    format: TextureFormat,
-    label: &str,
-    shader_src: &str,
-    params_bytes: &[u8],
-) -> Box<dyn FilterNode> {
-    let pass = build_shader_pass(
-        device,
-        host_layout,
-        image_layout,
-        format,
-        label,
-        shader_src,
-        params_bytes,
-        &[],
-    );
-    Box::new(ShaderNode {
-        label: label.to_string(),
-        pipeline: pass.pipeline,
-        params_bg: pass.params_bg,
-        _params_buf: pass.params_buf,
-    })
-}
 
 /// An external addon's node: one fullscreen pass plus, *only if the addon
 /// declares `consume`*, a per-frame `@group(3)` signals uniform it refreshes
@@ -269,52 +193,3 @@ pub fn external_shader_node(
     })
 }
 
-// ---- manifest construction helpers --------------------------------------
-
-/// Base manifest shared by all builtin addons (api 1..=1, pipeline kind).
-fn base_manifest(id: &str, name: &str, description: &str) -> Manifest {
-    Manifest {
-        manifest_version: CURRENT_MANIFEST_VERSION,
-        id: id.into(),
-        name: name.into(),
-        version: "1.0.0".into(),
-        author: "static (builtin)".into(),
-        description: description.into(),
-        license: None,
-        homepage: None,
-        tags: vec![],
-        api_min: 1,
-        api_max: 1,
-        kind: AddonKind::Pipeline,
-        permissions: Default::default(),
-        shaders: vec![],
-        assets: vec![],
-        params: BTreeMap::new(),
-        publish: vec![],
-        consume: vec![],
-    }
-}
-
-fn f32_param(default: f32, min: f32, max: f32, label: &str) -> ParamSpec {
-    ParamSpec::F32 {
-        default,
-        min: Some(min),
-        max: Some(max),
-        ui: UiHints {
-            label: Some(label.into()),
-            group: None,
-            help: None,
-        },
-    }
-}
-
-fn bool_param(default: bool, label: &str) -> ParamSpec {
-    ParamSpec::Bool {
-        default,
-        ui: UiHints {
-            label: Some(label.into()),
-            group: None,
-            help: None,
-        },
-    }
-}
