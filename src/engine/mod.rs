@@ -32,7 +32,7 @@ use crate::addon::pipeline::{PipelineConfig, SinkConfig, SourceConfig};
 use crate::addon::registry::AddonRegistry;
 use crate::addon::schema::ParamValue;
 use crate::addons::{CrtAddon, DotRendererAddon};
-use crate::behavior::{builtins, BehaviorHandle, BehaviorInit, BehaviorRuntime};
+use crate::behavior::{addons, builtins, BehaviorHandle, BehaviorHost, BehaviorInit, BehaviorRuntime};
 use crate::camera::{FrameSource, WebcamCapture};
 use crate::runtime::{PipelineRuntime, SINK_WINDOW, SOURCE_WEBCAM};
 use crate::signal::{
@@ -136,25 +136,36 @@ impl Engine {
         runtime
             .register_builtin::<CrtAddon>()
             .expect("register crt");
-        // Behavior addons are registered as manifests only (no filter factory);
-        // the behavior runtime constructs them.
-        runtime
-            .register_behavior(builtins::time::manifest())
-            .expect("register time behavior");
 
         // The webcam is the source; hand its view to the runtime.
         runtime.set_source(&gpu.device, &video.view);
 
         // Pick up any on-disk addons installed under `addons/` (missing → no-op).
+        // Scanned *before* behavior registration so an executable behavior can
+        // bind its factory to a package discovered here (the package then owns
+        // the UI param schema; the factory supplies only execution).
         if let Err(e) = runtime.scan_addons(Path::new(ADDONS_ROOT)) {
             eprintln!("[engine] addon scan failed: {e}");
         }
+
+        // Register executable behaviors through the host seam — a registry
+        // lookup, never a per-addon dispatch arm. `time` is the legacy reference
+        // producer; `face-tracking-lite` is the first external behavior package.
+        runtime
+            .register_behavior_with(builtins::time::manifest(), builtins::time::init_with)
+            .expect("register time behavior");
+        runtime
+            .register_behavior_with(
+                addons::face_tracking_lite::manifest(),
+                addons::face_tracking_lite::init_with,
+            )
+            .expect("register face-tracking-lite behavior");
 
         let config = load_pipeline_config();
 
         // Build the schema from the config's behaviors (publish) + filters
         // (consume), then the store + filters — all before the first frame.
-        let inits = build_behavior_inits(&config);
+        let inits = BehaviorHost::create_inits(runtime.behavior_registry(), &config.behaviors);
         let (schema, warnings) = build_schema(&inits, &config, runtime.registry())
             .expect("initial pipeline schema is invalid");
         for w in &warnings {
@@ -351,7 +362,8 @@ impl Engine {
     /// (i.e. a behavior was added/removed) — filter edits and behavior
     /// enable/param edits leave them running. On any error nothing is swapped.
     fn rebuild(&mut self) -> std::result::Result<(), String> {
-        let inits = build_behavior_inits(&self.config);
+        let inits =
+            BehaviorHost::create_inits(self.runtime.behavior_registry(), &self.config.behaviors);
         let (schema, warnings) =
             build_schema(&inits, &self.config, self.runtime.registry()).map_err(|e| e.to_string())?;
         for w in &warnings {
@@ -556,26 +568,6 @@ fn default_pipeline() -> PipelineConfig {
     config.add_node("crt", None);
     config.add_behavior("time");
     config
-}
-
-/// Build the runnable behavior instances from the config's `behaviors` list.
-/// Unknown behavior addons are skipped with a warning.
-fn build_behavior_inits(config: &PipelineConfig) -> Vec<BehaviorInit> {
-    config
-        .behaviors
-        .iter()
-        .filter_map(|node| match node.addon.as_str() {
-            "time" => Some(builtins::time::init_with(
-                node.instance_id.clone(),
-                node.config.clone(),
-                node.enabled,
-            )),
-            other => {
-                eprintln!("[engine] unknown behavior addon {other:?} — skipped");
-                None
-            }
-        })
-        .collect()
 }
 
 /// Build the signal schema: every behavior's published signals (so the schema

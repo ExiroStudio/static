@@ -30,6 +30,7 @@ use crate::addon::manifest::Manifest;
 use crate::addon::pipeline::PipelineConfig;
 use crate::addon::registry::{AddonEntry, AddonRegistry};
 use crate::addon::{AddonError, Result};
+use crate::behavior::{BehaviorFactory, BehaviorRegistry};
 use crate::engine::image::ImageBinding;
 
 pub use context::{
@@ -55,9 +56,13 @@ pub struct PipelineRuntime {
     /// Manifests of the builtin addons, kept so a registry rescan (after an
     /// install/uninstall) can re-register them alongside the on-disk addons.
     builtin_manifests: Vec<Manifest>,
-    /// Manifests of builtin behavior addons (registered for listing/validation;
-    /// they have no filter factory — the behavior runtime constructs them).
+    /// Manifests of behavior addons registered in-code (registered for
+    /// listing/validation; they have no filter factory — the behavior runtime
+    /// constructs them). Re-registered on a rescan after install/uninstall.
     behavior_manifests: Vec<Manifest>,
+    /// Behavior id → instance factory (the Phase 3 execution seam). The engine
+    /// creates behavior instances by lookup here, never by a hardcoded match.
+    behavior_registry: BehaviorRegistry,
 
     // Host-owned GPU resources, shared by every node.
     host: HostUniform,
@@ -101,6 +106,7 @@ impl PipelineRuntime {
             factories: HashMap::new(),
             builtin_manifests: Vec::new(),
             behavior_manifests: Vec::new(),
+            behavior_registry: BehaviorRegistry::new(),
             host,
             image,
             format,
@@ -128,11 +134,41 @@ impl PipelineRuntime {
         Ok(())
     }
 
-    /// Register a builtin behavior addon by manifest only — it appears in the
-    /// registry (for UI listing + schema validation) but has no filter factory.
+    /// Register a behavior addon by manifest only — it appears in the registry
+    /// (for UI listing + schema validation) but has **no factory**, so it is not
+    /// executable (a reference/non-executable producer). Kept as the manifest-only
+    /// half of the seam; [`register_behavior_with`](Self::register_behavior_with)
+    /// is the executable path.
+    #[allow(dead_code)] // retained API surface; executable behaviors use `_with`
     pub fn register_behavior(&mut self, manifest: Manifest) -> Result<()> {
         self.behavior_manifests.push(manifest.clone());
         self.registry.register_builtin(manifest)
+    }
+
+    /// Register an **executable** behavior addon: bind a [`BehaviorFactory`] to
+    /// its id (the Phase 3 seam) and, unless a scanned on-disk package already
+    /// provided the manifest, register that manifest for UI/validation. Call
+    /// after [`scan_addons`](Self::scan_addons) so a compiled factory can attach
+    /// to a package discovered on disk (the package is then authoritative for the
+    /// UI param schema; the factory only supplies execution).
+    pub fn register_behavior_with(
+        &mut self,
+        manifest: Manifest,
+        factory: BehaviorFactory,
+    ) -> Result<()> {
+        self.behavior_registry.register(&manifest.id, factory);
+        if !self.registry.contains(&manifest.id) {
+            self.behavior_manifests.push(manifest.clone());
+            self.registry.register_builtin(manifest)?;
+        }
+        Ok(())
+    }
+
+    /// The behavior factory registry — the engine resolves `pipeline.json`
+    /// behavior entries to runnable instances through this (by lookup, not by
+    /// name).
+    pub fn behavior_registry(&self) -> &BehaviorRegistry {
+        &self.behavior_registry
     }
 
     /// Scan an addons directory for on-disk addons, in addition to whatever is

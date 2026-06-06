@@ -6,11 +6,15 @@
 //! GPU and never block rendering. The render thread controls the runtime only
 //! through a [`BehaviorHandle`] (non-blocking command channel + a stop flag).
 //!
-//! Spike-era note: the only behavior is [`builtins::time`]. The schema is still
-//! the static `SignalSchema::standard()`; building it from manifests is a later
-//! phase and does not change the contracts here.
+//! Producers reach the scheduler two ways, both ending in a `BehaviorInit`:
+//! [`builtins`] (compiled-in reference producers) and [`addons`] (external
+//! packages bound through the [`host`] seam — [`BehaviorRegistry`] +
+//! [`BehaviorFactory`]). The scheduler does not know or care which path an
+//! instance came from.
 
+pub mod addons;
 pub mod builtins;
+pub mod host;
 pub mod node;
 mod scheduler;
 
@@ -25,6 +29,7 @@ use crate::addon::schema::{ParamMap, ParamSpec, ParamValue};
 use crate::camera::FrameSource;
 use crate::signal::{SignalPublisher, SignalSchema, SignalSpec};
 
+pub use host::{BehaviorFactory, BehaviorHost, BehaviorRegistry};
 pub use node::BehaviorNode;
 
 use scheduler::BehaviorScheduler;

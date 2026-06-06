@@ -1,0 +1,55 @@
+manifest_version = 1
+
+# ---- identity ----
+id          = "face-tracking-lite"
+name        = "Face Tracking Lite"
+version     = "1.0.0"
+author      = "static (example)"
+description = "CPU blob-based face tracker: publishes face.position, face.rotation, face.scale. The first executable external behavior addon — bound to its id through the BehaviorRegistry seam, no engine dispatch edit."
+license     = "MIT"
+tags        = ["behavior", "face", "tracking", "signal", "example"]
+
+# ---- engine compatibility ----
+api_min = 1
+api_max = 1
+
+# ---- kind ----
+# A behavior runs on the behavior thread (~30 Hz), reads the latest CPU frame,
+# and only publishes signals. Execution comes from a registered BehaviorFactory
+# (see src/behavior/addons/face_tracking_lite.rs); this manifest is the package
+# face: identity, params (UI schema), and the published signal set.
+kind = "behavior"
+
+# ---- parameters (drive the schema-generated Behavior panel) ----
+[params.threshold]
+type    = "f32"
+default = 0.5
+min     = 0.0
+max     = 1.0
+label   = "Threshold"
+group   = "Tracking"
+help    = "Foreground sensitivity relative to mean luma."
+
+[params.smoothing]
+type    = "f32"
+default = 0.2
+min     = 0.02
+max     = 1.0
+label   = "Smoothing"
+group   = "Tracking"
+help    = "EMA factor; lower is smoother and slower to respond."
+
+# ---- signals published ----
+# Each [[publish]] becomes one slot in the signal schema. AsciiMaskOverlay
+# consumes these three by name through @group(3).
+[[publish]]
+name = "face.position"
+kind = "vec2"
+
+[[publish]]
+name = "face.rotation"
+kind = "f32"
+
+[[publish]]
+name = "face.scale"
+kind = "f32"

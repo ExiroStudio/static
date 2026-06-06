@@ -1,15 +1,37 @@
 {
   "format_version": 2,
-  "name": "Default — surveillance dots",
+  "name": "Face mask — surveillance ASCII",
   "source": {
     "type": "webcam",
     "config": {}
   },
   "pipeline": [
     {
+      "instance_id": "Oh3oe4Kxy0",
+      "addon": "ascii-mask-overlay",
+      "enabled": true,
+      "config": {
+        "mask_size": 0.13,
+        "opacity": 1.0
+      }
+    },
+    {
+      "instance_id": "node-dot",
+      "addon": "dot-renderer",
+      "enabled": true,
+      "config": {
+        "cell_size": 8.0,
+        "contrast": 0.8,
+        "dot_softness": 0.18000000000000002,
+        "exposure": 1.35,
+        "glow": 0.75,
+        "mirror": true
+      }
+    },
+    {
       "instance_id": "node-crt",
       "addon": "crt",
-      "enabled": false,
+      "enabled": true,
       "config": {
         "aperture": 0.26,
         "brightness": 1.1,
@@ -18,24 +40,12 @@
         "scanline": 0.22000000000000003,
         "vignette": 0.35000000000000003
       }
-    },
-    {
-      "instance_id": "node-dot",
-      "addon": "dot-renderer",
-      "enabled": true,
-      "config": {
-        "cell_size": 9.0,
-        "contrast": 0.9,
-        "dot_softness": 0.12,
-        "exposure": 1.1,
-        "mirror": true
-      }
     }
   ],
   "behaviors": [
     {
-      "instance_id": "beh-time",
-      "addon": "time",
+      "instance_id": "ohX3xG0pas",
+      "addon": "face-tracking-lite",
       "enabled": true,
       "config": {}
     }

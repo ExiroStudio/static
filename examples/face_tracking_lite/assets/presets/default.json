@@ -1,0 +1,8 @@
+{
+  "name": "Default tracking",
+  "description": "Balanced sensitivity and smoothing for typical webcam lighting.",
+  "params": {
+    "threshold": 0.5,
+    "smoothing": 0.2
+  }
+}

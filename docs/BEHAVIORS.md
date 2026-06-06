@@ -75,13 +75,17 @@ later ids → those instances take the safe per-instance reload.
 
 ## v1 status & the Phase 3 extension point
 
-v1 ships **one** builtin behavior, `time` (`signal.time = sin(elapsed)`), as the
-reference producer; the engine constructs builtin behaviors directly. Externally
-**loadable** behaviors (scripted/native) are a Phase 3 extension point — they
-need executable code, which v1 deliberately does not load. The
-[`behavior_time`](../examples/behavior_time) and
+v1 shipped **one** builtin behavior, `time` (`signal.time = sin(elapsed)`), as the
+reference producer, dispatched by a hardcoded `match`. **Phase 3a** replaced that
+match with the [Behavior Host](BEHAVIOR_HOST.md) seam: a `BehaviorRegistry` of
+`BehaviorFactory`s, resolved by lookup. `time` now registers through it, and
+[`face_tracking_lite`](../examples/face_tracking_lite) is the first **executable
+external** behavior package to use it — adding a producer no longer edits the
+dispatch. A factory's code is still compiled in (v1 loads no scripting/native/
+wasm); an out-of-process backend behind the same `BehaviorFactory` signature is
+**Phase 3b**. The [`behavior_time`](../examples/behavior_time) and
 [`behavior_counter`](../examples/behavior_counter) examples document the manifest
-+ trait shape an external behavior will take.
++ trait shape.
 
 See [SIGNALS](SIGNALS.md) for the store and [FILTERS](FILTERS.md) for the
 consume side.

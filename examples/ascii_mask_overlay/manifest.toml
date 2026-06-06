@@ -1,0 +1,79 @@
+manifest_version = 1
+
+# ---- identity ----
+id          = "ascii-mask-overlay"
+name        = "ASCII Mask Overlay"
+version     = "1.0.0"
+author      = "static (example)"
+description = "Retro CRT ASCII face mask. Consumes face.position/rotation/scale via @group(3) and draws a procedural >_< that translates, rotates, and scales to follow the tracked face. Hides when no face signal."
+license     = "MIT"
+tags        = ["filter", "overlay", "ascii", "surveillance", "signal", "example"]
+
+# ---- engine compatibility ----
+api_min = 1
+api_max = 1
+
+# ---- kind ----
+# A pipeline (filter) addon. It ships no compiled code — the engine's generic
+# external-shader runner loads the WGSL, composes it with the prelude, packs the
+# numeric params into @group(2) (sorted-key order), and (because `consume` is
+# non-empty) builds the @group(3) signals uniform and refreshes it every frame
+# via prepare(). No rebuild, no bind-group recreation on signal change.
+kind = "pipeline"
+
+[[shaders]]
+id    = "main"
+path  = "shaders/ascii_mask.wgsl"
+stage = "fragment"
+entry = "fs_main"
+
+# ---- parameters ----
+# Packed into @group(2) by the runner in SORTED-KEY order:
+#   [ascii_expression, mask_size, opacity]
+# `ascii_expression` is a `text` param; non-numeric params pack as 0.0, so it is
+# a UI/declaration field only — v1 is single-expression mode and renders ">_<"
+# procedurally (expression switching is intentionally excluded). The shader
+# struct lists the three in this exact order, padded to 16 bytes.
+[params.ascii_expression]
+type    = "text"
+default = ">_<"
+label   = "ASCII Expression"
+group   = "Mask"
+help    = "Single-expression mode. v1 renders >_< procedurally; switching is intentionally excluded."
+
+[params.mask_size]
+type    = "f32"
+default = 0.25
+min     = 0.05
+max     = 1.0
+label   = "Mask Size"
+group   = "Mask"
+help    = "Base half-size of the glyph, in screen-height units."
+
+[params.opacity]
+type    = "f32"
+default = 0.9
+min     = 0.0
+max     = 1.0
+label   = "Opacity"
+group   = "Mask"
+help    = "Overlay strength; multiplied by the smooth presence fade."
+
+# ---- signals consumed ----
+# Declared order defines @group(3) packing: slot 0 = face.position (.xy),
+# slot 1 = face.rotation (.x), slot 2 = face.scale (.x). All optional: with no
+# publisher the slots read 0.0 (the fallback) → scale 0 → the overlay hides.
+[[consume]]
+name     = "face.position"
+kind     = "vec2"
+optional = true
+
+[[consume]]
+name     = "face.rotation"
+kind     = "f32"
+optional = true
+
+[[consume]]
+name     = "face.scale"
+kind     = "f32"
+optional = true

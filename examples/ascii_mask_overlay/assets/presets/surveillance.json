@@ -1,0 +1,9 @@
+{
+  "name": "Surveillance",
+  "description": "Compact, bright tracking mask with the surveillance frame prominent.",
+  "params": {
+    "ascii_expression": ">_<",
+    "mask_size": 0.22,
+    "opacity": 0.95
+  }
+}
