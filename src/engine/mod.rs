@@ -138,10 +138,6 @@ impl Engine {
         // The webcam is the source; hand its view to the runtime.
         runtime.set_source(&gpu.device, &video.view);
 
-        // Pick up any on-disk addons installed under `addons/` (missing → no-op).
-        // Scanned *before* behavior registration so an executable behavior can
-        // bind its factory to a package discovered here (the package then owns
-        // the UI param schema; the factory supplies only execution).
         if let Err(e) = runtime.scan_addons(Path::new(ADDONS_ROOT)) {
             eprintln!("[engine] addon scan failed: {e}");
         }
@@ -149,7 +145,7 @@ impl Engine {
 
         let mut config = load_pipeline_config();
 
-        // [R3] Robustness: filter out any reference to an addon that doesn't exist
+        // Robustness: filter out any reference to an addon that doesn't exist
         // in the registry. This prevents startup panics when an addon is uninstalled.
         if Self::clean_config(&mut config, &runtime) {
             println!("[engine] pipeline.json contained missing addons; cleaning...");
@@ -159,8 +155,8 @@ impl Engine {
         // Build the schema from the config's behaviors (publish) + filters
         // (consume), then the store + filters — all before the first frame.
         let (inits, skipped) = BehaviorHost::create_inits(runtime.behavior_registry(), &config.behaviors);
-        for (id, reason) in skipped {
-            eprintln!("[engine] behavior addon {id:?} skipped: {reason:?}");
+        for (addon_id, reason) in skipped {
+            eprintln!("[engine] behavior addon {addon_id:?} skipped: {reason:?}");
         }
 
         let (schema, warnings) = build_schema(&inits, &config, runtime.registry())
@@ -402,28 +398,42 @@ impl Engine {
         for w in &warnings {
             eprintln!("[engine] {w}");
         }
-        let schema_changed = schema.as_ref() != self.schema.as_ref();
 
-        // Build filters against whichever schema will be live; on failure keep
-        // the live build (any new store endpoints are simply dropped).
-        if schema_changed {
+        let schema_changed = schema.as_ref() != self.schema.as_ref();
+        // [P0] Fix: Reload is needed if the schema changed OR the behavior set/config changed.
+        // We compare against `last_good` (the last successfully applied config).
+        let behavior_changed = self.config.behaviors != self.last_good.behaviors;
+        let reload_needed = schema_changed || behavior_changed;
+
+        if reload_needed {
             let (publisher, reader) = SignalStore::new(&schema);
+
+            // [P1] Atomic Commit: 1. Try build runtime.
             self.runtime
                 .build(&self.gpu.device, &self.config, &schema)
                 .map_err(|e| reload::humanize(&e))?;
-            // Success → swap render-side state, async-reload the behavior thread.
-            self.schema = schema.clone();
+
+            // 2. Try reload behavior thread.
+            if let Err(e) = self.behavior.reload(publisher, schema.clone(), inits, sync) {
+                // If behavior reload fails (e.g. worker stalled), ROLLBACK the runtime
+                // to its last good state to prevent split-state.
+                let _ = self.runtime.build(&self.gpu.device, &self.last_good, &self.schema);
+                return Err(e.to_string());
+            }
+
+            // 3. Success -> COMMIT render-side handles.
+            self.schema = schema;
             self.reader = reader;
             self.signals = self.reader.snapshot();
             self.last_pubs = 0;
             self.metric_epoch += 1;
-            self.behavior.reload(publisher, schema, inits, sync)
-                .map_err(|e| e.to_string())?;
         } else {
+            // Just filters or params changed; hot-apply to runtime.
             self.runtime
                 .build(&self.gpu.device, &self.config, &self.schema)
                 .map_err(|e| reload::humanize(&e))?;
         }
+
         self.group3_bytes = group3_bytes(&self.config, self.runtime.registry());
         Ok(())
     }
@@ -432,9 +442,9 @@ impl Engine {
 
     /// Add a behavior addon to the set. Returns the new instance id.
     pub fn add_behavior(&mut self, addon_id: &str) -> String {
-        let id = self.config.add_behavior(addon_id);
+        let instance_id = self.config.add_behavior(addon_id);
         self.reload.mark_dirty_now();
-        id
+        instance_id
     }
 
     pub fn remove_behavior(&mut self, instance_id: &str) {

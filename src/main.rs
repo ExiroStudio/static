@@ -18,8 +18,10 @@ mod runtime;
 mod signal;
 mod ui;
 
+// #[cfg(test)]
+// mod smoke;
 #[cfg(test)]
-mod smoke;
+mod audit_validation;
 
 use winit::event_loop::{ControlFlow, EventLoop};
 

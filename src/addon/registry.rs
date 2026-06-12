@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::compat::{check_compat, ENGINE_API_VERSION};
+use super::compat::{ENGINE_API_VERSION, check_compat};
 use super::error::{AddonError, Result};
 use super::manifest::Manifest;
 
@@ -86,6 +86,8 @@ impl AddonRegistry {
                 continue;
             }
             if let Err(e) = self.load_one(&path) {
+                eprintln!("[ADDON REJECTED]\npath={:?}\nreason={}\n", path, e);
+
                 self.rejected.push(RejectedAddon {
                     root: path,
                     reason: e.to_string(),

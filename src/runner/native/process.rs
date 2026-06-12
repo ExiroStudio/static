@@ -15,6 +15,7 @@
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use super::transport::ControlTransport;
 use super::{encode_request, ControlRequest, ControlResponse, TransportError};
@@ -59,9 +60,31 @@ impl NativeProcess {
             .map_err(|_| TransportError::Closed)
     }
 
-    /// Best-effort graceful-then-forced termination + reap. (`std::process` only
-    /// exposes SIGKILL on unix; a SIGTERM grace window needs `libc` — Known Debt.)
+    /// Graceful-then-forced termination + reap. Uses `SIGTERM` with a 50ms window
+    /// before falling back to `SIGKILL`.
     pub fn terminate(&mut self) {
+        if let Ok(Some(_)) = self.child.try_wait() {
+            return; // Already exited.
+        }
+
+        // 1. Try SIGTERM (via external kill command to avoid libc/nix dependency).
+        let pid = self.child.id();
+        let _ = Command::new("kill")
+            .arg("-15") // SIGTERM
+            .arg(pid.to_string())
+            .status();
+
+        // 2. Wait for a short grace period.
+        let grace = Instant::now();
+        let timeout = Duration::from_millis(50);
+        while grace.elapsed() < timeout {
+            if let Ok(Some(_)) = self.child.try_wait() {
+                return; // Exited gracefully.
+            }
+            std::thread::yield_now();
+        }
+
+        // 3. Fallback to SIGKILL + reap.
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -69,9 +92,8 @@ impl NativeProcess {
 
 impl Drop for NativeProcess {
     fn drop(&mut self) {
-        // Reap unconditionally — no zombie, no escape.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // Ensure the process is dead and reaped.
+        self.terminate();
     }
 }
 

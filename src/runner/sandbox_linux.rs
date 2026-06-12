@@ -10,7 +10,7 @@ impl LinuxLandlockSandbox {
     pub fn enforce_readonly(&self, allowed_path: &Path) -> Result<(), SandboxError> {
         // Build a ruleset that allows read access to the requested path
         let abi = ABI::V1; // Landlock ABI version
-        let mut ruleset = Ruleset::default()
+        let ruleset = Ruleset::default()
             .handle_access(AccessFs::from_all(abi))
             .map_err(|_| SandboxError::NotImplemented)?
             .create()

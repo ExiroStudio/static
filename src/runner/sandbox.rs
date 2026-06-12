@@ -95,10 +95,13 @@ mod tests {
 
     #[test]
     fn placeholders_report_platform_and_enforce_nothing() {
+        let linux = LinuxSandbox::default();
+        let mac = MacSandbox;
+        let win = WindowsSandbox;
         let backends: [(&dyn Sandbox, &str); 3] = [
-            (&LinuxSandbox, "linux"),
-            (&MacSandbox, "macos"),
-            (&WindowsSandbox, "windows"),
+            (&linux, "linux"),
+            (&mac, "macos"),
+            (&win, "windows"),
         ];
         let spec = SandboxSpec {
             camera: true,

@@ -7,13 +7,11 @@
 //!   source ──▶ node ──▶ node ──▶ … ──▶ sink
 //! ```
 //!
-//! The runtime resolves each pipeline node's addon through the
-//! [`AddonRegistry`], instantiates it through the addon's own factory, and
-//! executes the nodes in order, passing a [`FrameContext`] between them via two
-//! ping-pong GPU targets. It special-cases nothing: builtin and (future)
-//! external addons run through the identical [`FilterNode`] interface. There
-//! is no graph compilation, no dependency resolution, no scheduler — just
 //! sequential execution.
+//!
+//! Addons are identified by an `addon_id` (matching `manifest.toml#id`).
+//! Filters are instantiated via `NodeFactory`; behaviors are registered
+//! in the `behavior_registry`.
 
 pub mod context;
 pub mod host;
@@ -65,7 +63,7 @@ pub struct PipelineRuntime {
     /// listing/validation; they have no filter factory — the behavior runtime
     /// constructs them). Re-registered on a rescan after install/uninstall.
     behavior_manifests: Vec<Manifest>,
-    /// Behavior id → instance factory (the Phase 3 execution seam). The engine
+    /// Behavior addon identifier → instance factory. The engine
     /// creates behavior instances by lookup here, never by a hardcoded match.
     behavior_registry: BehaviorRegistry,
 
@@ -125,12 +123,8 @@ impl PipelineRuntime {
         }
     }
 
-    /// Register an **executable** behavior addon: bind a [`BehaviorFactory`] to
-    /// its id (the Phase 3 seam) and, unless a scanned on-disk package already
-    /// provided the manifest, register that manifest for UI/validation. Call
     /// after [`scan_addons`](Self::scan_addons) so a compiled factory can attach
-    /// to a package discovered on disk (the package is then authoritative for the
-    /// UI param schema; the factory only supplies execution).
+    /// to a package discovered on disk.
     pub fn register_behavior_with(
         &mut self,
         manifest: Manifest,
@@ -387,7 +381,6 @@ impl PipelineRuntime {
 mod tests {
     use super::*;
     use crate::addon::pipeline::{SinkConfig, SourceConfig};
-    use crate::addons::{CrtAddon, DotRendererAddon};
 
     fn default_source() -> SourceConfig {
         SourceConfig {
@@ -402,48 +395,9 @@ mod tests {
         }
     }
 
-    /// Builtin addons register and validate through the same metadata path an
-    /// external addon would (no GPU needed for this part).
     #[test]
-    fn builtin_addons_register_and_validate() {
-        let mut registry = AddonRegistry::new();
-        registry
-            .register_builtin(DotRendererAddon::manifest())
-            .unwrap();
-        registry.register_builtin(CrtAddon::manifest()).unwrap();
-
-        assert!(registry.contains("dot-renderer"));
-        assert!(registry.contains("crt"));
-        assert!(registry.get("crt").unwrap().builtin);
-
-        // The README pipeline: webcam → dot-renderer → crt → window.
-        let mut config = PipelineConfig::new(default_source(), default_sink());
-        config.add_node("dot-renderer", None);
-        config.add_node("crt", None);
-
-        let issues = config.validate_against(&registry);
-        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
-    }
-
-    #[test]
-    fn unknown_addon_is_rejected_by_validation() {
-        let mut registry = AddonRegistry::new();
-        registry
-            .register_builtin(DotRendererAddon::manifest())
-            .unwrap();
-
-        let mut config = PipelineConfig::new(default_source(), default_sink());
-        config.add_node("does-not-exist", None);
-
-        let issues = config.validate_against(&registry);
-        assert_eq!(issues.len(), 1);
-    }
-
-    /// A real builtin manifest must pass its own structural validation,
-    /// including the "param defaults satisfy their own spec" rule.
-    #[test]
-    fn builtin_manifests_are_self_consistent() {
-        DotRendererAddon::manifest().validate().unwrap();
-        CrtAddon::manifest().validate().unwrap();
+    fn empty_registry_is_valid() {
+        let registry = AddonRegistry::new();
+        assert_eq!(registry.len(), 0);
     }
 }

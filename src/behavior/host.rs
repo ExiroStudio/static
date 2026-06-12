@@ -104,6 +104,7 @@ mod tests {
     use super::*;
     use crate::addon::schema::ParamMap;
     use crate::behavior::node::{BehaviorCtx, BehaviorNode, BehaviorStartCtx};
+    use crate::behavior::SkipReason;
     use crate::signal::SignalSpec;
     use std::collections::BTreeMap;
 
@@ -161,7 +162,7 @@ mod tests {
 
         assert_eq!(inits.len(), 1, "unregistered behavior is skipped, not faked");
         assert_eq!(skipped.len(), 1);
-        assert_eq!(skipped[0].1, super::SkipReason::FilesystemMissing);
+        assert_eq!(skipped[0].1, SkipReason::FilesystemMissing);
         assert_eq!(inits[0].instance_id, "a");
         assert_eq!(inits[0].publish.len(), 1);
         assert_eq!(inits[0].publish[0].name, "noop.signal");

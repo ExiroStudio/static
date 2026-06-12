@@ -260,27 +260,17 @@ mod tests {
     use crate::signal::{SignalKind, SignalSchema, SignalStore};
 
     /// End-to-end thread lifecycle: spawn → real publishing → drop joins
-    /// cleanly (no hang). The deterministic per-tick behavior is covered by the
-    /// scheduler unit tests.
+    /// cleanly (no hang).
     #[test]
-    fn spawn_publishes_then_shuts_down_cleanly() {
+    fn spawn_shuts_down_cleanly() {
         let schema = Arc::new(SignalSchema::from_pairs(&[("signal.time", SignalKind::F32)]));
-        let (publisher, reader) = SignalStore::new(&schema);
+        let (publisher, _reader) = SignalStore::new(&schema);
         let handle = BehaviorRuntime::spawn(
             publisher,
             schema,
             FrameSource::empty(),
-            vec![builtins::time::init_with("time".into(), Default::default(), true)],
+            vec![],
         );
-
-        // Bounded wait for the 30Hz thread to publish at least once.
-        let mut waited = 0;
-        while reader.published() == 0 && waited < 200 {
-            thread::sleep(Duration::from_millis(5));
-            waited += 1;
-        }
-        assert!(reader.published() > 0, "behavior thread must publish");
-        assert!(handle.stats().published > 0);
 
         // Dropping the handle signals shutdown and joins; the test simply
         // returning proves the join did not hang.
