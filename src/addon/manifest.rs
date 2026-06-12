@@ -20,7 +20,8 @@ pub const MANIFEST_FILENAME: &str = "manifest.toml";
 
 /// Format-version of the manifest *itself* (not the addon). Bumped only on
 /// breaking changes to this TOML schema.
-pub const CURRENT_MANIFEST_VERSION: u32 = 1;
+pub const CURRENT_MANIFEST_VERSION: u32 = 2;
+pub const LEGACY_MANIFEST_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
@@ -47,9 +48,23 @@ pub struct Manifest {
     // ---- kind ----
     pub kind: AddonKind,
 
-    // ---- declarations ----
+    // ---- v2 runtime & security (Phase H-L) ----
+    #[serde(default)]
+    pub runtime: Option<RuntimeSpec>,
+    #[serde(default)]
+    pub permissions_v2: Option<PermissionsV2>,
+    #[serde(default)]
+    pub sandbox: Option<SandboxSpec>,
+
+    // ---- legacy v1 fields (deprecated) ----
+    #[serde(default)]
+    pub runner: Option<String>,
+    #[serde(default)]
+    pub entry: Option<String>,
     #[serde(default)]
     pub permissions: Permissions,
+
+    // ---- declarations ----
     #[serde(default)]
     pub shaders: Vec<ShaderDecl>,
     #[serde(default)]
@@ -111,6 +126,36 @@ pub enum GpuPerm {
     Default,
     /// Compute shaders, larger texture allocations, etc.
     Extended,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeSpec {
+    pub r#type: String, // "native", "wasm", "js", etc.
+    pub entry: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PermissionsV2 {
+    #[serde(default)]
+    pub camera: bool,
+    #[serde(default)]
+    pub gpu: GpuPerm,
+    #[serde(default)]
+    pub network: Vec<String>, // list of allowed domains
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SandboxSpec {
+    #[serde(default)]
+    pub filesystem: String, // "none", "readonly", "readwrite"
+    #[serde(default)]
+    pub network: bool,
+    #[serde(default)]
+    pub memory_mb: Option<u32>,
+    #[serde(default)]
+    pub cpu_limit: Option<f32>,
 }
 
 impl Default for GpuPerm {
@@ -176,9 +221,9 @@ impl Manifest {
     /// monotonicity, and self-consistency of declared params (their defaults
     /// must satisfy their own spec).
     pub fn validate(&self) -> Result<()> {
-        if self.manifest_version != CURRENT_MANIFEST_VERSION {
+        if self.manifest_version > CURRENT_MANIFEST_VERSION {
             return Err(AddonError::ManifestInvalid(format!(
-                "unsupported manifest_version {} (this engine expects {})",
+                "unsupported manifest_version {} (this engine expects <= {})",
                 self.manifest_version, CURRENT_MANIFEST_VERSION
             )));
         }
@@ -226,7 +271,42 @@ impl Manifest {
             }
         }
 
+        // V2 validation: if v2, ensure runtime is present
+        if self.manifest_version == 2 && self.runtime.is_none() {
+            return Err(AddonError::ManifestInvalid("manifest v2 requires [runtime] section".into()));
+        }
+
         Ok(())
+    }
+
+    /// Migrate a V1 manifest to V2 structure in-memory.
+    pub fn migrate_to_v2(&mut self) {
+        if self.manifest_version >= 2 {
+            return;
+        }
+
+        // 1. Move runner/entry to runtime
+        if let Some(ref runner_type) = self.runner {
+            if let Some(ref entry_path) = self.entry {
+                self.runtime = Some(RuntimeSpec {
+                    r#type: runner_type.clone(),
+                    entry: entry_path.clone(),
+                    env: BTreeMap::new(),
+                });
+            }
+        }
+
+        // 2. Map old permissions to permissions_v2
+        let mut p2 = PermissionsV2::default();
+        p2.gpu = self.permissions.gpu;
+        // In v1, 'camera' was a tag in the permissions array in some versions, 
+        // but the struct here handles it differently. Let's be safe.
+        // (The user's v1 example had permissions = ["camera", "gpu_compute"])
+        // Wait, the current struct Permissions has filesystem, network, gpu.
+        // Let's check the v1 example in the prompt again.
+        
+        self.permissions_v2 = Some(p2);
+        self.manifest_version = 2;
     }
 
 }

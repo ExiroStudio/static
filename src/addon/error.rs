@@ -56,6 +56,12 @@ pub enum AddonError {
     #[error("unsupported sink type {0:?}")]
     UnsupportedSink(String),
 
+    #[error("runtime error: {0}")]
+    Runtime(String),
+
+    #[error("sandbox violation: {0}")]
+    Sandbox(String),
+
     #[error("package format error: {0}")]
     Package(String),
 

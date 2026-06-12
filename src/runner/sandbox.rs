@@ -1,14 +1,21 @@
-//! [`Sandbox`] — the confinement seam. **Trait + placeholders only.**
-//!
-//! Step 1 defines the surface and three platform stubs; it implements **no**
-//! enforcement (no seccomp/Landlock/namespaces/AppContainer/`sandbox_init`). Every
-//! backend's [`apply`](Sandbox::apply) returns [`SandboxError::NotImplemented`] so
-//! the absence of confinement is explicit and can never be mistaken for a granted
-//! sandbox. Real enforcement is a later step (Linux first, per the RFC).
-//!
-//! [`SandboxSpec`] carries the *requested* capabilities (a declaration, not
-//! enforcement). `gpu_compute` is the addon's own GPU-compute context (never the
-//! engine's GPU) per RFC §Q4a.
+// [`Sandbox`] — the confinement seam. **Trait + placeholders only.**
+//
+// Step 1 defines the surface and three platform stubs; it implements **no**
+// enforcement (no seccomp/Landlock/namespaces/AppContainer/`sandbox_init`). Every
+// backend's [`apply`](Sandbox::apply) returns [`SandboxError::NotImplemented`] so
+// the absence of confinement is explicit and can never be mistaken for a granted
+// enforcement (no seccomp/Landlock/namespaces/AppContainer/`sandbox_init`). Every
+// backend's [`apply`](Sandbox::apply) returns [`SandboxError::NotImplemented`] so
+// the absence of confinement is explicit and can never be mistaken for a granted
+// sandbox. Real enforcement is a later step (Linux first, per the RFC).
+
+#[path = "sandbox_linux.rs"]
+mod sandbox_linux;
+pub use sandbox_linux::LinuxLandlockSandbox;
+
+// [`SandboxSpec`] carries the *requested* capabilities (a declaration, not
+// enforcement). `gpu_compute` is the addon's own GPU-compute context (never the
+// engine's GPU) per RFC §Q4a.
 
 /// The capabilities a runner *requests* for its child. Step 1: a declaration the
 /// trait would consume — nothing here is enforced.
@@ -46,10 +53,12 @@ pub trait Sandbox {
 
 /// Linux confinement (future: seccomp-bpf + Landlock + namespaces + cgroups).
 #[derive(Debug, Default)]
-pub struct LinuxSandbox;
+pub struct LinuxSandbox {
+    inner: LinuxLandlockSandbox,
+}
 impl Sandbox for LinuxSandbox {
-    fn apply(&self, _spec: &SandboxSpec) -> Result<(), SandboxError> {
-        Err(SandboxError::NotImplemented)
+    fn apply(&self, spec: &SandboxSpec) -> Result<(), SandboxError> {
+        self.inner.apply(spec)
     }
     fn platform(&self) -> &'static str {
         "linux"

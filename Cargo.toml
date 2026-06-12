@@ -21,6 +21,10 @@ serde_json = "1"
 toml = "0.8"
 thiserror = "1"
 nanoid = "0.4"
+libloading = "0.8"
+wasmtime = "22"
+async-trait = "0.1"
+landlock = "0.4"
 
 # UI v1 — egui overlay. egui-wgpu 0.28 targets wgpu 0.20. We deliberately do
 # NOT use egui-winit: its 0.28 release pins winit 0.29, which conflicts with the

@@ -308,7 +308,7 @@ impl Engine {
         self.reload.mark_dirty_now();
         let id = installed
             .file_name()
-            .and_then(|s| s.to_str())
+            .and_then(|s: &std::ffi::OsStr| s.to_str())
             .unwrap_or("addon")
             .to_string();
         Ok(id)

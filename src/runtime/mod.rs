@@ -38,6 +38,11 @@ pub use context::{
     ResolvedConfig, SignalContext,
 };
 pub use signals_group::{signals_layout, SignalsBinding};
+pub mod driver;
+pub mod registry;
+pub mod native;
+pub mod wasm;
+pub mod policy;
 use host::HostUniform;
 use sink::WindowSink;
 use targets::RenderTarget;
