@@ -32,7 +32,9 @@ use crate::addon::pipeline::{PipelineConfig, SinkConfig, SourceConfig};
 use crate::addon::registry::AddonRegistry;
 use crate::addon::schema::ParamValue;
 use crate::addons::{CrtAddon, DotRendererAddon};
-use crate::behavior::{addons, builtins, BehaviorHandle, BehaviorHost, BehaviorInit, BehaviorRuntime};
+use crate::behavior::{
+    BehaviorHandle, BehaviorHost, BehaviorInit, BehaviorRuntime, addons, builtins,
+};
 use crate::camera::{FrameSource, WebcamCapture};
 use crate::runtime::{PipelineRuntime, SINK_WINDOW, SOURCE_WEBCAM};
 use crate::signal::{
@@ -173,9 +175,16 @@ impl Engine {
 
         // Build the schema from the config's behaviors (publish) + filters
         // (consume), then the store + filters — all before the first frame.
-        let inits = BehaviorHost::create_inits(runtime.behavior_registry(), &config.behaviors);
+        let (inits, skipped) =
+            BehaviorHost::create_inits(runtime.behavior_registry(), &config.behaviors);
+
         let (schema, warnings) = build_schema(&inits, &config, runtime.registry())
             .expect("initial pipeline schema is invalid");
+
+        for (addon, reason) in skipped {
+            eprintln!("[engine] behavior '{}' skipped: {:?}", addon, reason);
+        }
+
         for w in &warnings {
             eprintln!("[engine] {w}");
         }
@@ -218,8 +227,11 @@ impl Engine {
 
     pub fn resize(&mut self, width: u32, height: u32) {
         self.gpu.resize(width, height);
-        self.runtime
-            .resize(&self.gpu.device, self.gpu.config.width, self.gpu.config.height);
+        self.runtime.resize(
+            &self.gpu.device,
+            self.gpu.config.width,
+            self.gpu.config.height,
+        );
     }
 
     // ---- UI-facing read API (no engine internals leak out) ----
@@ -384,8 +396,8 @@ impl Engine {
     fn rebuild(&mut self, sync: bool) -> std::result::Result<(), String> {
         let (inits, _skipped) =
             BehaviorHost::create_inits(self.runtime.behavior_registry(), &self.config.behaviors);
-        let (schema, warnings) =
-            build_schema(&inits, &self.config, self.runtime.registry()).map_err(|e| e.to_string())?;
+        let (schema, warnings) = build_schema(&inits, &self.config, self.runtime.registry())
+            .map_err(|e| e.to_string())?;
         for w in &warnings {
             eprintln!("[engine] {w}");
         }
@@ -404,7 +416,8 @@ impl Engine {
             self.signals = self.reader.snapshot();
             self.last_pubs = 0;
             self.metric_epoch += 1;
-            self.behavior.reload(publisher, schema, inits, sync)
+            self.behavior
+                .reload(publisher, schema, inits, sync)
                 .map_err(|e| e.to_string())?;
         } else {
             self.runtime
@@ -443,7 +456,10 @@ impl Engine {
     /// Set a behavior parameter. Hot: applied live via a command, persisted on
     /// a debounce — no rebuild, no behavior re-create.
     pub fn set_behavior_param(&mut self, instance_id: &str, key: &str, value: ParamValue) {
-        if self.config.set_behavior_param(instance_id, key, value.clone()) {
+        if self
+            .config
+            .set_behavior_param(instance_id, key, value.clone())
+        {
             self.behavior.set_param(instance_id, key, value);
             self.save_at = Some(Instant::now());
         }
@@ -493,7 +509,9 @@ impl Engine {
         let frame = match self.gpu.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(SurfaceError::Lost | SurfaceError::Outdated) => {
-                self.gpu.surface.configure(&self.gpu.device, &self.gpu.config);
+                self.gpu
+                    .surface
+                    .configure(&self.gpu.device, &self.gpu.config);
                 return; // overlay skipped this frame too; next frame re-runs the UI
             }
             Err(_) => return,
@@ -504,8 +522,13 @@ impl Engine {
         self.reader.snapshot_into(&mut self.signals);
 
         let time = self.start.elapsed().as_secs_f32();
-        self.runtime
-            .render(&self.gpu.device, &self.gpu.queue, &view, time, &self.signals); // encoder #1 (submits)
+        self.runtime.render(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &view,
+            time,
+            &self.signals,
+        ); // encoder #1 (submits)
 
         self.log_stats();
 
@@ -550,8 +573,13 @@ impl Engine {
             eprintln!(
                 "[stats] fps={:.1} builds={} signal_hz={:.0} signal.time={t:+.3} | \
                  behavior {:.0}Hz update={:.0}us reload={:.1}ms group3={}B",
-                s.fps, s.build_count, s.signal_hz, s.behavior_hz, s.behavior_update_us,
-                s.reload_ms, s.group3_bytes
+                s.fps,
+                s.build_count,
+                s.signal_hz,
+                s.behavior_hz,
+                s.behavior_update_us,
+                s.reload_ms,
+                s.group3_bytes
             );
         }
 
