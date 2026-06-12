@@ -23,7 +23,7 @@ use super::{BehaviorCommand, BehaviorInit, BehaviorStatsShared};
 /// ~30 Hz tick period.
 const TICK_PERIOD: Duration = Duration::from_millis(33);
 /// Per-tick update budget; exceeding it bumps a stat (and warns in debug).
-const UPDATE_BUDGET: Duration = Duration::from_millis(8);
+const UPDATE_BUDGET: Duration = Duration::from_millis(20);
 
 /// One live behavior plus its owned, mutable config (so `SetParam` is a hot
 /// update that never recreates the instance).

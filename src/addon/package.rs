@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use zip::ZipArchive;
 
 use super::error::{AddonError, Result};
-use super::manifest::{Manifest, MANIFEST_FILENAME};
+use super::manifest::{MANIFEST_FILENAME, Manifest};
 
 /// Compute the destination directory an addon would extract into.
 pub fn install_path(addons_root: &Path, id: &str) -> PathBuf {
@@ -41,9 +41,32 @@ pub fn peek_manifest(package_path: &Path) -> Result<Manifest> {
     let file = fs::File::open(package_path)?;
     let mut zip =
         ZipArchive::new(file).map_err(|e| AddonError::Package(format!("not a valid zip: {e}")))?;
+    let manifest_entry = (0..zip.len()).find_map(|i| {
+        let file = zip.by_index(i).ok()?;
+
+        let name = file.name();
+
+        if name == "manifest.toml" {
+            Some(name.to_string())
+        } else if name.ends_with("/manifest.toml") {
+            Some(name.to_string())
+        } else {
+            None
+        }
+    });
+
+    let Some(manifest_path) = manifest_entry else {
+        return Err(AddonError::Package(format!(
+            "{} not found in package",
+            MANIFEST_FILENAME
+        )));
+    };
+
+    eprintln!("[pkg] manifest={}", manifest_path);
+
     let mut entry = zip
-        .by_name(MANIFEST_FILENAME)
-        .map_err(|_| AddonError::Package(format!("{MANIFEST_FILENAME} not found in package")))?;
+        .by_name(&manifest_path)
+        .map_err(|_| AddonError::Package(format!("failed opening {}", manifest_path)))?;
     let mut text = String::new();
     entry.read_to_string(&mut text)?;
     let manifest: Manifest = toml::from_str(&text).map_err(|e| AddonError::ManifestParse {
@@ -60,8 +83,19 @@ pub fn peek_manifest(package_path: &Path) -> Result<Manifest> {
 /// existing install of the same id is replaced. Entries that would escape the
 /// destination directory (zip-slip) are rejected. Returns the install path.
 pub fn install(package_path: &Path, addons_root: &Path) -> Result<PathBuf> {
+    eprintln!(
+        "[pkg] install package={} root={}",
+        package_path.display(),
+        addons_root.display()
+    );
+
     let manifest = peek_manifest(package_path)?;
+
+    eprintln!("[pkg] manifest id={}", manifest.id);
+
     let dest = install_path(addons_root, &manifest.id);
+
+    eprintln!("[pkg] dest={}", dest.display());
 
     // Fresh install: clear any previous version of this addon.
     if dest.exists() {
@@ -73,10 +107,21 @@ pub fn install(package_path: &Path, addons_root: &Path) -> Result<PathBuf> {
     let mut zip =
         ZipArchive::new(file).map_err(|e| AddonError::Package(format!("not a valid zip: {e}")))?;
 
+    let root_prefix = (0..zip.len())
+        .filter_map(|i| {
+            zip.by_index(i)
+                .ok()
+                .and_then(|e| e.name().split('/').next().map(str::to_string))
+        })
+        .collect::<std::collections::HashSet<_>>();
+
+    let strip_root = root_prefix.len() == 1;
+
     for i in 0..zip.len() {
         let mut entry = zip
             .by_index(i)
             .map_err(|e| AddonError::Package(format!("corrupt zip entry: {e}")))?;
+        eprintln!("[pkg] extract {}", entry.name());
 
         // `enclosed_name` returns `None` for unsafe paths (absolute, `..`, …).
         let Some(rel) = entry.enclosed_name() else {
@@ -84,7 +129,21 @@ pub fn install(package_path: &Path, addons_root: &Path) -> Result<PathBuf> {
                 "package contains an unsafe path".into(),
             ));
         };
+
+        // normalisasi supaya semua jadi PathBuf
+        let rel: PathBuf = if strip_root {
+            rel.strip_prefix(root_prefix.iter().next().unwrap())
+                .ok()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+                .unwrap_or(rel)
+        } else {
+            rel
+        };
+
         let out_path = dest.join(&rel);
+
+        eprintln!("[pkg] {} -> {}", entry.name(), out_path.display());
         // Belt-and-suspenders against zip-slip.
         if !out_path.starts_with(&dest) {
             return Err(AddonError::Package(
@@ -102,7 +161,7 @@ pub fn install(package_path: &Path, addons_root: &Path) -> Result<PathBuf> {
             std::io::copy(&mut entry, &mut out)?;
         }
     }
-
+    eprintln!("[pkg] install success {}", dest.display());
     Ok(dest)
 }
 
@@ -252,12 +311,7 @@ kind = "pipeline"
         use std::io::Write;
         use zip::write::{SimpleFileOptions, ZipWriter};
 
-        fn add(
-            zip: &mut ZipWriter<fs::File>,
-            base: &Path,
-            dir: &Path,
-            opts: SimpleFileOptions,
-        ) {
+        fn add(zip: &mut ZipWriter<fs::File>, base: &Path, dir: &Path, opts: SimpleFileOptions) {
             for entry in fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
                 let rel = path

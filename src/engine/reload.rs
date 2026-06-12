@@ -74,6 +74,7 @@ impl Default for ReloadState {
 /// act on. No engine vocabulary leaks through.
 pub fn humanize(e: &AddonError) -> String {
     use AddonError::*;
+    eprintln!("[reload error]\n{:#?}", e);
     match e {
         PipelineRejected(s) => format!("Some settings are invalid:\n{s}"),
         UnsupportedSource(k) => format!("Unknown input source '{k}'."),
