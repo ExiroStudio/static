@@ -126,7 +126,7 @@ impl BehaviorNode for FaceTrackingLite {
             ctx.publish(id, SignalValue::Vec2(self.sm_pos));
         }
         if let Some(id) = self.rot_id {
-            ctx.publish(id, SignalValue::F32(self.sm_rot));
+            ctx.publish(id, SignalValue::Vec3([0.0, 0.0, self.sm_rot]));
         }
         if let Some(id) = self.scale_id {
             ctx.publish(id, SignalValue::F32(self.sm_scale));
@@ -156,7 +156,7 @@ fn published() -> Vec<SignalSpec> {
         },
         SignalSpec {
             name: FACE_ROTATION.into(),
-            kind: SignalKind::F32,
+            kind: SignalKind::Vec3,
         },
         SignalSpec {
             name: FACE_SCALE.into(),
@@ -219,6 +219,8 @@ pub fn manifest() -> Manifest {
         api_min: 1,
         api_max: 1,
         kind: AddonKind::Behavior,
+        runner: None,
+        entry: None,
         permissions: Default::default(),
         shaders: vec![],
         assets: vec![],

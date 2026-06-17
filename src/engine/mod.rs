@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use wgpu::*;
 use winit::window::Window;
 
+use crate::addon::manifest::AddonKind;
 use crate::addon::package;
 use crate::addon::pipeline::{PipelineConfig, SinkConfig, SourceConfig};
 use crate::addon::registry::AddonRegistry;
@@ -35,6 +36,7 @@ use crate::addons::{CrtAddon, DotRendererAddon};
 use crate::behavior::{
     BehaviorHandle, BehaviorHost, BehaviorInit, BehaviorRuntime, addons, builtins,
 };
+use crate::behavior::native;
 use crate::camera::{FrameSource, WebcamCapture};
 use crate::runtime::{PipelineRuntime, SINK_WINDOW, SOURCE_WEBCAM};
 use crate::signal::{
@@ -166,8 +168,8 @@ impl Engine {
             .expect("register time behavior");
         runtime
             .register_behavior_with(
-                addons::face_tracking_lite::manifest(),
-                addons::face_tracking_lite::init_with,
+                crate::behavior::addons::face_tracking_lite::manifest(),
+                crate::behavior::addons::face_tracking_lite::init_with,
             )
             .expect("register face-tracking-lite behavior");
 
@@ -175,8 +177,13 @@ impl Engine {
 
         // Build the schema from the config's behaviors (publish) + filters
         // (consume), then the store + filters — all before the first frame.
-        let (inits, skipped) =
+        let (mut inits, skipped) =
             BehaviorHost::create_inits(runtime.behavior_registry(), &config.behaviors);
+
+        // Discover native behavior addons (kind=behavior, runner=native) and
+        // create their BehaviorInits directly.
+        let native_inits = create_native_inits(runtime.registry(), &config);
+        inits.extend(native_inits);
 
         let (schema, warnings) = build_schema(&inits, &config, runtime.registry())
             .expect("initial pipeline schema is invalid");
@@ -394,8 +401,12 @@ impl Engine {
     /// (i.e. a behavior was added/removed) — filter edits and behavior
     /// enable/param edits leave them running. On any error nothing is swapped.
     fn rebuild(&mut self, sync: bool) -> std::result::Result<(), String> {
-        let (inits, _skipped) =
+        let (mut inits, _skipped) =
             BehaviorHost::create_inits(self.runtime.behavior_registry(), &self.config.behaviors);
+        // Append native behavior inits.
+        let native_inits = create_native_inits(self.runtime.registry(), &self.config);
+        inits.extend(native_inits);
+
         let (schema, warnings) = build_schema(&inits, &self.config, self.runtime.registry())
             .map_err(|e| e.to_string())?;
         for w in &warnings {
@@ -657,4 +668,85 @@ fn group3_bytes(config: &PipelineConfig, registry: &AddonRegistry) -> usize {
         .filter_map(|n| registry.get(&n.addon))
         .map(|e| e.manifest.consume.len() * 16)
         .sum()
+}
+
+/// Scan the registry for addons with `kind=behavior, runner="native"` and create
+/// [`BehaviorInit`]s for each. This bypasses the `BehaviorFactory` fn-pointer
+/// mechanism because native inits need to capture the entry path.
+fn create_native_inits(
+    registry: &AddonRegistry,
+    config: &PipelineConfig,
+) -> Vec<BehaviorInit> {
+    let mut inits = Vec::new();
+    for entry in registry.iter() {
+        let m = &entry.manifest;
+        if m.kind != AddonKind::Behavior {
+            continue;
+        }
+        let runner = match m.runner.as_deref() {
+            Some("native") => "native",
+            _ => continue,
+        };
+        // Check if this behavior is actually enabled in the config
+        let is_enabled = config.behaviors.iter().any(|b| b.addon == m.id && b.enabled);
+        if !is_enabled {
+            continue;
+        }
+        let entry_rel = match &m.entry {
+            Some(e) => e,
+            None => {
+                eprintln!(
+                    "[engine] native behavior {:?} has no entry path — skipped",
+                    m.id
+                );
+                continue;
+            }
+        };
+        let entry_path = entry.root.join(entry_rel);
+        if !entry_path.exists() {
+            eprintln!(
+                "[engine] native behavior {:?} entry {:?} not found — skipped",
+                m.id, entry_path
+            );
+            continue;
+        }
+
+        // Check if this behavior is in the pipeline config's behavior set.
+        // If not, add it implicitly (native behaviors auto-activate).
+        let instance_id = config
+            .behaviors
+            .iter()
+            .find(|b| b.addon == m.id)
+            .map(|b| b.instance_id.clone())
+            .unwrap_or_else(|| m.id.clone());
+
+        let values = config
+            .behaviors
+            .iter()
+            .find(|b| b.addon == m.id)
+            .map(|b| b.config.clone())
+            .unwrap_or_default();
+
+        let enabled = config
+            .behaviors
+            .iter()
+            .find(|b| b.addon == m.id)
+            .map(|b| b.enabled)
+            .unwrap_or(true);
+
+        eprintln!(
+            "[engine] discovered native behavior {:?} (runner={}, entry={:?})",
+            m.id, runner, entry_path
+        );
+
+        inits.push(native::native_init(
+            instance_id,
+            entry_path,
+            m.publish.clone(),
+            m.params.clone(),
+            values,
+            enabled,
+        ));
+    }
+    inits
 }

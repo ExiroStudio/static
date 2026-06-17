@@ -15,6 +15,7 @@
 pub mod addons;
 pub mod builtins;
 pub mod host;
+pub mod native;
 pub mod node;
 mod scheduler;
 

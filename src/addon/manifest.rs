@@ -47,6 +47,16 @@ pub struct Manifest {
     // ---- kind ----
     pub kind: AddonKind,
 
+    // ---- runner ----
+    /// Execution runner. `None` or absent → compiled-in; `"native"` → cdylib
+    /// loaded via `libloading`. Only `"native"` is supported.
+    #[serde(default)]
+    pub runner: Option<String>,
+    /// Entry point path (relative to the addon root). Required when
+    /// `runner = "native"` — points at the `.so`/`.dylib`/`.dll`.
+    #[serde(default)]
+    pub entry: Option<String>,
+
     // ---- declarations ----
     #[serde(default)]
     pub permissions: Permissions,

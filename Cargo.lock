@@ -3219,6 +3219,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "image",
+ "libloading 0.8.9",
  "naga",
  "nanoid",
  "nokhwa",

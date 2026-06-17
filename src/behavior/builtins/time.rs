@@ -62,6 +62,8 @@ pub fn manifest() -> Manifest {
         api_min: 1,
         api_max: 1,
         kind: AddonKind::Behavior,
+        runner: None,
+        entry: None,
         permissions: Default::default(),
         shaders: vec![],
         assets: vec![],

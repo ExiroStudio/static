@@ -58,7 +58,6 @@ impl BehaviorRegistry {
         self.factories.contains_key(id)
     }
 
-    #[allow(dead_code)] // read surface for diagnostics / a future "executable?" UI badge
     pub fn len(&self) -> usize {
         self.factories.len()
     }

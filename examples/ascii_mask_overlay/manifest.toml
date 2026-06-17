@@ -70,7 +70,7 @@ optional = true
 
 [[consume]]
 name     = "face.rotation"
-kind     = "f32"
+kind     = "vec3"
 optional = true
 
 [[consume]]

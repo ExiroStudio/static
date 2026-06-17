@@ -286,6 +286,8 @@ fn base_manifest(id: &str, name: &str, description: &str) -> Manifest {
         api_min: 1,
         api_max: 1,
         kind: AddonKind::Pipeline,
+        runner: None,
+        entry: None,
         permissions: Default::default(),
         shaders: vec![],
         assets: vec![],

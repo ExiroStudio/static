@@ -45,6 +45,8 @@ mod tests {
             api_min: min,
             api_max: max,
             kind: AddonKind::Pipeline,
+            runner: None,
+            entry: None,
             permissions: Default::default(),
             shaders: vec![],
             assets: vec![],
