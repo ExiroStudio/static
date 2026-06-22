@@ -136,6 +136,7 @@ impl<'a> ResolvedConfig<'a> {
         match self.value(key) {
             Some(ParamValue::F32(x)) => x as f32,
             Some(ParamValue::I32(i)) => i as f32,
+            Some(ParamValue::Bool(b)) => if b { 1.0 } else { 0.0 },
             _ => 0.0,
         }
     }

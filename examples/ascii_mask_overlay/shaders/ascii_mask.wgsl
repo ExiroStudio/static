@@ -8,13 +8,20 @@
 // rebuild, no bind-group recreation, no text system, and no font.
 
 // @group(2): params packed by the runner in SORTED-KEY order as f32s, padded to
-// 16 bytes: [ascii_expression, mask_size, opacity]. `ascii_expression` is a text
-// param → packs as 0.0 (single-expression mode; the glyph is procedural).
+// 16 bytes.
 struct Params {
     ascii_expression: f32,
     mask_size: f32,
+    mirror_x: f32,
+    mirror_y: f32,
+    offset_x: f32,
+    offset_y: f32,
     opacity: f32,
-    _pad: f32,
+    rotation_offset: f32,
+    scale_mul: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 };
 @group(2) @binding(0) var<uniform> P: Params;
 
@@ -42,61 +49,188 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let rot = S.v[1].x;
     let scl = S.v[2].x;
 
-    // Presence: scale ~0 (no face / fallback) → hidden; smooth fade-in as the
-    // tracked face grows. This is the "no signal → hide" rule, done as a fade.
-    let presence = smoothstep(0.02, 0.18, scl);
+    // lebih cepat muncul
+    let presence = smoothstep(0.01, 0.10, scl);
     let alpha = clamp(P.opacity, 0.0, 1.0) * presence;
+
     if (alpha <= 0.001) {
         return vec4<f32>(img, 1.0);
     }
 
-    // Face centre in uv space. X is mirrored to match the selfie preview
-    // (dot-renderer mirror=true is the default): raw-right → screen-left.
-    // Y: +1 = top.
-    let center = vec2<f32>(0.5 - pos.x * 0.5, 0.5 - pos.y * 0.5);
+    //--------------------------------------
+    // CALIBRATION & COORDINATE FIX
+    //--------------------------------------
 
-    // Glyph half-size in screen-height units; signal scale → 0.5..2.0 × mask_size.
-    let half = max(P.mask_size, 0.001) * mix(0.5, 2.0, clamp(scl, 0.0, 1.0));
+    // 1. Coordinate normalization
+    // Tracker provides pos in [0.0, 1.0] range.
+    var center = pos;
 
-    // Fragment → glyph-local space: translate, aspect-correct, rotate, scale.
+    // 2. Mirror
+    if (P.mirror_x > 0.5) {
+        center.x = 1.0 - center.x;
+    }
+    if (P.mirror_y > 0.5) {
+        center.y = 1.0 - center.y;
+    }
+
+    // 3. Offset
+    center.x += P.offset_x;
+    center.y += P.offset_y;
+
+    // 4. Rotation Offset
+    let rot_final = rot + P.rotation_offset;
+
+    // 5. Scale Multiplier
+    let scl_final = scl * P.scale_mul;
+
+    //--------------------------------------
+    // SIZE FIX
+    //--------------------------------------
+
+    // lebih besar sedikit
+    let half =
+        max(P.mask_size, 0.001)
+        * mix(0.85, 2.6, clamp(scl_final * 1.2, 0.0, 1.0));
+
+    //--------------------------------------
+    // ROTATION FIX
+    //--------------------------------------
+
     let aspect = H.resolution.x / max(H.resolution.y, 1.0);
-    var d = in.uv - center;
-    d.x = d.x * aspect;
-    let c = cos(rot);
-    let sn = sin(rot);
-    let r = vec2<f32>(c * d.x - sn * d.y, sn * d.x + c * d.y);
-    let local = r / half; // glyph occupies roughly [-1,1]^2
 
-    // Cheap reject outside the glyph box → passthrough.
-    if (abs(local.x) > 1.3 || abs(local.y) > 1.3) {
+    var d = in.uv - center;
+
+    d.x *= aspect;
+
+    // kurangi rotasi liar
+    let safe_rot =
+        clamp(rot_final * 0.25, -0.35, 0.35);
+
+    let c = cos(safe_rot);
+    let sn = sin(safe_rot);
+
+    let r = vec2<f32>(
+        c*d.x - sn*d.y,
+        sn*d.x + c*d.y
+    );
+
+    var local = r / half;
+
+    // Fix Y orientation: UV y=0 is top, our shape math assumes +y is UP.
+    local.y = -local.y;
+
+    //--------------------------------------
+    // CULL
+    //--------------------------------------
+
+    if (
+        abs(local.x) > 1.45 ||
+        abs(local.y) > 1.45
+    ) {
         return vec4<f32>(img, 1.0);
     }
 
-    // ">_<": left eye '>', mouth '_', right eye '<'. Pure line segments.
-    let stroke = 0.10;
+    //--------------------------------------
+    // ASCII
+    //--------------------------------------
+
+    let stroke = 0.08;
+
     var dmin = 1e9;
-    // left eye '>'
-    dmin = min(dmin, seg(local, vec2<f32>(-0.70, 0.45), vec2<f32>(-0.32, 0.12)));
-    dmin = min(dmin, seg(local, vec2<f32>(-0.32, 0.12), vec2<f32>(-0.70, -0.18)));
-    // right eye '<'
-    dmin = min(dmin, seg(local, vec2<f32>(0.70, 0.45), vec2<f32>(0.32, 0.12)));
-    dmin = min(dmin, seg(local, vec2<f32>(0.32, 0.12), vec2<f32>(0.70, -0.18)));
-    // mouth '_'
-    dmin = min(dmin, seg(local, vec2<f32>(-0.34, -0.55), vec2<f32>(0.34, -0.55)));
 
-    let ink = 1.0 - smoothstep(stroke - 0.04, stroke + 0.04, dmin);
+    dmin=min(dmin,seg(local,
+        vec2<f32>(-0.70,0.42),
+        vec2<f32>(-0.30,0.10)
+    ));
 
-    // Surveillance tracking box: a thin frame around the glyph.
-    let box_d = abs(max(abs(local.x), abs(local.y)) - 1.15);
-    let frame = (1.0 - smoothstep(0.0, 0.03, box_d)) * 0.35;
+    dmin=min(dmin,seg(local,
+        vec2<f32>(-0.30,0.10),
+        vec2<f32>(-0.70,-0.18)
+    ));
 
-    // CRT scanlines + faint flicker on the overlay marks (retro terminal feel).
-    let scan = 0.8 + 0.2 * sin(in.uv.y * H.resolution.y * 1.2);
-    let flicker = 0.9 + 0.1 * sin(H.time * 30.0);
+    dmin=min(dmin,seg(local,
+        vec2<f32>(0.70,0.42),
+        vec2<f32>(0.30,0.10)
+    ));
 
-    let phosphor = vec3<f32>(0.55, 1.0, 0.65); // terminal green
-    let mark = max(ink, frame) * scan * flicker;
+    dmin=min(dmin,seg(local,
+        vec2<f32>(0.30,0.10),
+        vec2<f32>(0.70,-0.18)
+    ));
 
-    let outc = mix(img, phosphor, clamp(mark * alpha, 0.0, 1.0));
-    return vec4<f32>(outc, 1.0);
+    dmin=min(dmin,seg(local,
+        vec2<f32>(-0.28,-0.52),
+        vec2<f32>(0.28,-0.52)
+    ));
+
+    let ink =
+        1.0
+        - smoothstep(
+            stroke-0.03,
+            stroke+0.03,
+            dmin
+        );
+
+    //--------------------------------------
+    // BOX
+    //--------------------------------------
+
+    let box_d =
+        abs(
+            max(
+                abs(local.x),
+                abs(local.y)
+            ) - 1.10
+        );
+
+    let frame =
+        (
+            1.0
+            - smoothstep(
+                0.0,
+                0.02,
+                box_d
+            )
+        ) * 0.22;
+
+    //--------------------------------------
+
+    let scan =
+        0.90
+        + 0.10
+        * sin(
+            in.uv.y
+            * H.resolution.y
+        );
+
+    let flicker =
+        0.95
+        + 0.05
+        * sin(
+            H.time*18.0
+        );
+
+    let phosphor =
+        vec3<f32>(
+            0.72,
+            1.0,
+            0.80
+        );
+
+    let mark =
+        max(
+            ink,
+            frame
+        )
+        * scan
+        * flicker;
+
+    return vec4(
+        mix(
+            img,
+            phosphor,
+            mark*alpha
+        ),
+        1.0
+    );
 }

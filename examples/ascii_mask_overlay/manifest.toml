@@ -50,6 +50,38 @@ label   = "Mask Size"
 group   = "Mask"
 help    = "Base half-size of the glyph, in screen-height units."
 
+[params.mirror_x]
+type    = "bool"
+default = true
+label   = "Mirror X"
+group   = "Calibration"
+help    = "Flip horizontally."
+
+[params.mirror_y]
+type    = "bool"
+default = false
+label   = "Mirror Y"
+group   = "Calibration"
+help    = "Flip vertically."
+
+[params.offset_x]
+type    = "f32"
+default = 0.0
+min     = -2.0
+max     = 2.0
+label   = "Offset X"
+group   = "Calibration"
+help    = "Horizontal center offset."
+
+[params.offset_y]
+type    = "f32"
+default = 0.0
+min     = -2.0
+max     = 2.0
+label   = "Offset Y"
+group   = "Calibration"
+help    = "Vertical center offset."
+
 [params.opacity]
 type    = "f32"
 default = 0.9
@@ -59,6 +91,23 @@ label   = "Opacity"
 group   = "Mask"
 help    = "Overlay strength; multiplied by the smooth presence fade."
 
+[params.rotation_offset]
+type    = "f32"
+default = 0.0
+min     = -3.14159
+max     = 3.14159
+label   = "Rotation Offset"
+group   = "Calibration"
+help    = "Rotation calibration in radians."
+
+[params.scale_mul]
+type    = "f32"
+default = 1.0
+min     = 0.0
+max     = 5.0
+label   = "Scale Multiplier"
+group   = "Calibration"
+help    = "Scale multiplier."
 # ---- signals consumed ----
 # Declared order defines @group(3) packing: slot 0 = face.position (.xy),
 # slot 1 = face.rotation (.x), slot 2 = face.scale (.x). All optional: with no

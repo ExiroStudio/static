@@ -11,8 +11,15 @@
       "addon": "ascii-mask-overlay",
       "enabled": true,
       "config": {
-        "mask_size": 0.13,
-        "opacity": 1.0
+        "ascii_expression": ">_",
+        "mask_size": 0.09,
+        "mirror_x": false,
+        "mirror_y": false,
+        "offset_x": 0.0,
+        "offset_y": -0.04,
+        "opacity": 1.0,
+        "rotation_offset": 0.0,
+        "scale_mul": 2.0
       }
     },
     {
@@ -20,34 +27,41 @@
       "addon": "dot-renderer",
       "enabled": true,
       "config": {
-        "cell_size": 8.0,
-        "contrast": 0.8,
-        "dot_softness": 0.18000000000000002,
-        "exposure": 1.35,
-        "glow": 0.75,
+        "cell_size": 9.7,
+        "contrast": 1.5,
+        "dot_softness": 0.1,
+        "exposure": 1.1,
+        "glow": 0.7000000000000001,
         "mirror": true
       }
     },
     {
-      "instance_id": "node-crt",
+      "instance_id": "yocSSF0mv_",
       "addon": "crt",
       "enabled": true,
+      "config": {}
+    },
+    {
+      "instance_id": "FPVhZ9vi32",
+      "addon": "glitch-monitor",
+      "enabled": true,
       "config": {
-        "aperture": 0.26,
-        "brightness": 1.1,
-        "curvature": 0.65,
-        "persistence": 0.15000000000000002,
-        "scanline": 0.22000000000000003,
-        "vignette": 0.35000000000000003
+        "block_size": 15.0,
+        "displacement": 0.02,
+        "frequency": 0.15000000000000002,
+        "intensity": 0.0
       }
     }
   ],
   "behaviors": [
     {
-      "instance_id": "ohX3xG0pas",
-      "addon": "face-tracking-lite",
+      "instance_id": "nksLwiMV3G",
+      "addon": "face-tracking",
       "enabled": true,
-      "config": {}
+      "config": {
+        "detection_threshold": 0.51,
+        "smoothing": 0.2
+      }
     }
   ],
   "sink": {
