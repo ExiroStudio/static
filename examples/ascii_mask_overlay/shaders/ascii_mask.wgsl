@@ -46,11 +46,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let img = sample_rgb(in.uv);
 
     let pos = S.v[0].xy;
-    let rot = S.v[1].x;
+    let rot = S.v[1].z; // Use roll for 2D mask rotation
     let scl = S.v[2].x;
 
     // lebih cepat muncul
-    let presence = smoothstep(0.01, 0.10, scl);
+    let presence = smoothstep(0.01, 0.04, scl);
     let alpha = clamp(P.opacity, 0.0, 1.0) * presence;
 
     if (alpha <= 0.001) {
@@ -78,7 +78,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     center.y += P.offset_y;
 
     // 4. Rotation Offset
-    let rot_final = rot + P.rotation_offset;
+    // Invert roll so it rotates the correct direction
+    let rot_final = -rot + P.rotation_offset;
 
     // 5. Scale Multiplier
     let scl_final = scl * P.scale_mul;
@@ -87,10 +88,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // SIZE FIX
     //--------------------------------------
 
-    // lebih besar sedikit
-    let half =
-        max(P.mask_size, 0.001)
-        * mix(0.85, 2.6, clamp(scl_final * 1.2, 0.0, 1.0));
+    // Linear scale multiplier. 
+    // scl is inter-eye distance (normalized, ~0.05 - 0.15).
+    // Multiply by ~15 to map 0.067 to ~1.0 multiplier.
+    let half = max(P.mask_size, 0.001) * (scl_final * 15.0);
 
     //--------------------------------------
     // ROTATION FIX
@@ -102,9 +103,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     d.x *= aspect;
 
-    // kurangi rotasi liar
-    let safe_rot =
-        clamp(rot_final * 0.25, -0.35, 0.35);
+    // Use pure rotation directly since signal is now stabilized
+    let safe_rot = rot_final;
 
     let c = cos(safe_rot);
     let sn = sin(safe_rot);
@@ -114,7 +114,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         sn*d.x + c*d.y
     );
 
-    var local = r / half;
+    var local = r / half; // glyph occupies roughly [-1,1]^2
 
     // Fix Y orientation: UV y=0 is top, our shape math assumes +y is UP.
     local.y = -local.y;

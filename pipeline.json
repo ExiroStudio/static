@@ -7,48 +7,38 @@
   },
   "pipeline": [
     {
-      "instance_id": "Oh3oe4Kxy0",
+      "instance_id": "niBPRmkO35",
       "addon": "ascii-mask-overlay",
       "enabled": true,
       "config": {
-        "ascii_expression": ">_",
-        "mask_size": 0.09,
+        "mask_size": 0.05000000074505806,
         "mirror_x": false,
-        "mirror_y": false,
         "offset_x": 0.0,
-        "offset_y": -0.04,
+        "offset_y": -0.06,
         "opacity": 1.0,
-        "rotation_offset": 0.0,
         "scale_mul": 2.0
       }
     },
     {
-      "instance_id": "node-dot",
+      "instance_id": "S5Vs7m51TU",
       "addon": "dot-renderer",
       "enabled": true,
-      "config": {
-        "cell_size": 9.7,
-        "contrast": 1.5,
-        "dot_softness": 0.1,
-        "exposure": 1.1,
-        "glow": 0.7000000000000001,
-        "mirror": true
-      }
+      "config": {}
     },
     {
-      "instance_id": "yocSSF0mv_",
+      "instance_id": "WOCHk-hNIj",
       "addon": "crt",
       "enabled": true,
       "config": {}
     },
     {
-      "instance_id": "FPVhZ9vi32",
+      "instance_id": "gNptGRaWrr",
       "addon": "glitch-monitor",
       "enabled": true,
       "config": {
-        "block_size": 15.0,
-        "displacement": 0.02,
-        "frequency": 0.15000000000000002,
+        "block_size": 16.0,
+        "displacement": 0.04,
+        "frequency": 0.06,
         "intensity": 0.0
       }
     }
@@ -59,8 +49,9 @@
       "addon": "face-tracking",
       "enabled": true,
       "config": {
-        "detection_threshold": 0.51,
-        "smoothing": 0.2
+        "detection_threshold": 0.2,
+        "lost_timeout": 1.55,
+        "smoothing": 0.63
       }
     }
   ],
