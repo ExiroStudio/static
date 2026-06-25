@@ -81,6 +81,9 @@ A single unified Execution Platform runs all external logic (Behaviors and Rende
 *   **I010:** Architecture status independent from implementation.
 *   **I011:** Artifact must remain statically materializable. No runtime schema discovery.
 *   **I012:** Artifact belongs to exactly one FrameEpoch. Artifact cannot survive frame boundaries. Cross-frame artifact reuse forbidden.
+*   **I013:** Artifact schema resolution must be amortized. Per-frame schema reconstruction forbidden.
+*   **I014:** Broker materializes. Broker never computes.
+*   **I015:** ExecutionPlan compilation must be deterministic.
 
 Implementation violating an invariant must stop.
 
@@ -128,19 +131,21 @@ The `RenderArtifact` ABI describes semantic intent without any memory assumption
 *   **Validation:** happens synchronously at `HostApi::publish_artifact()`. Malformed artifacts are rejected before reaching the broker.
 
 ### Artifact Lifecycle
-*   `Generate` → `Publish` → `Stage` → `Consume` → `Drop`
-*   No caching allowed. Artifacts cannot survive frame boundaries (enforced by **I012**) to prevent async execution from overwriting newer frames.
+*   **Artifacts:** Ephemeral, frame-scoped.
+*   **Materialized Resources:** Cacheable, reusable, broker-owned.
+*   **Lifecycle Flow:** `Generate` → `Publish` → `Stage` → `Materialize` → `Consume` → `Drop Artifact` → `Retain Resource`
+*   *Reason:* MSDF atlas and future instancing should survive frame boundaries, while the layout data drops.
 
 ```rust
 pub enum RenderArtifact {
     None,
     Instances {
         schema: InstanceSchema,
-        rows: Vec<SemanticRow>, // Semantic fields, NOT packed bytes
+        rows: SemanticRows, // Immutable, amortized schema parsing
     },
     Geometry {
         topology: PrimitiveTopology,
-        vertices: Vec<SemanticRow>,
+        vertices: SemanticRows,
     },
     Overlay {
         content: OverlayContent,
@@ -152,12 +157,15 @@ pub enum RenderArtifact {
     },
     Custom {
         schema_id: u64,
-        rows: Vec<SemanticRow>,
+        rows: SemanticRows,
     }
 }
 
 pub enum OverlayContent {
-    Text(String),
+    Text {
+        content: String,
+        mode: TextMode,
+    },
     Icon(String),
     AtlasRegion {
         asset: String,
@@ -166,6 +174,17 @@ pub enum OverlayContent {
     Custom {
         schema_id: u64,
     }
+}
+
+pub enum TextMode {
+    Plain,
+    Rich,
+    Glyph,
+}
+
+pub struct SemanticRows {
+    pub schema_id: u64,
+    pub rows: std::sync::Arc<[SemanticRow]>,
 }
 
 pub struct InstanceSchema {
@@ -231,9 +250,10 @@ State progression: `Allocated` → `Warm` → `Active` → `Stale` → `Grace Wi
 *   **Persistent Assets:** Atlas and static textures must explicitly opt in to persistence to prevent immortal cache growth.
 
 **Broker Authority:**
-*   **Broker owns:** packing, stride, padding, upload batching, allocation growth.
+*   **Broker MAY:** pack, align, batch, cache, normalize memory.
+*   **Broker MUST NOT:** generate geometry, infer semantic layout, calculate transforms, synthesize artifacts, mutate semantic meaning.
 *   **Broker never owns:** graph order, execution timing, addon lifecycle.
-*   *Reason:* Prevent Broker becoming a hidden scheduler.
+*   *Reason:* Prevent Broker becoming a hidden scheduler or executing render logic.
 
 ---
 
@@ -297,6 +317,9 @@ Each Phase must pass these gates before merging:
 7.  **Artifact Purity Gate:** Same input → same artifact → same output.
     *   Artifacts must remain immutable after publish. Broker materialization cannot mutate artifact. Failure blocks merge.
     *   **Metrics:** `artifact_hash`, `frame_hash`, `allocation_count`.
+8.  **Compile Epoch Gate:** Same graph → same compile → same execution_plan → same plan_hash.
+    *   Mismatch = BLOCK.
+    *   **Metrics:** `plan_hash`, `allocation_hash`, `frame_hash`.
 
 ---
 
@@ -306,6 +329,7 @@ Each Phase must pass these gates before merging:
 *   `Accepted` ≠ implemented
 *   `Implemented` ≠ validated
 *   `Validated` ≠ frozen
+*   `Implemented` ≠ shipped
 *   `Reverted` ≠ rejected
 
 *Format: YYYY-MM-DD | Context | Decision | Consequence | Status*
@@ -337,7 +361,13 @@ Each Phase must pass these gates before merging:
 
 ## 14 plan.md Governance
 
-*   Architecture can evolve.
+*   Architecture can evolve. Architecture changes REQUIRE:
+    *   Decision ID
+    *   Reason
+    *   Cost
+    *   Rollback
+    *   Validation
+*   **Missing fields → reject change.** Decision without cost analysis is invalid.
 *   History cannot disappear.
 *   Old decisions remain visible.
 *   `Superseded` ≠ deleted.
