@@ -38,6 +38,7 @@ A single unified Execution Platform runs all external logic (Behaviors and Rende
 | **D003** | Engine Owns GPU | **Accepted** | Allowing addons to allocate buffers directly causes resource leaks, OOMs, and state desyncs. | Addons use Broker; zero direct `wgpu` access. |
 | **D004** | Artifact Model | **Accepted** | ExecutionUnit logic must not ruin graph order. Artifacts stay graph-local to guarantee pipeline composition (e.g., Overlay → CRT → Bloom). | Purity of execution order. |
 | **D005** | Semantic Payload | **Accepted** | `Vec<u8>` leaks GPU memory padding/alignment into addons, causing ABI breakage if engine GPU packing changes. | Addons describe *what*; Broker handles *how* (packing). |
+| **D006** | Architecture First Rename | **Accepted** | Public API rename only occurs after final execution boundaries exist. Avoid trait mutation chains. | Phase 1 focuses purely on graph skeleton. `FilterNode` persists internally. |
 
 ---
 
@@ -78,6 +79,8 @@ A single unified Execution Platform runs all external logic (Behaviors and Rende
 *   **I008:** Resource ownership survives hot reload.
 *   **I009:** Decision history cannot be rewritten.
 *   **I010:** Architecture status independent from implementation.
+*   **I011:** Artifact must remain statically materializable. No runtime schema discovery.
+*   **I012:** Artifact belongs to exactly one FrameEpoch. Artifact cannot survive frame boundaries. Cross-frame artifact reuse forbidden.
 
 Implementation violating an invariant must stop.
 
@@ -124,6 +127,10 @@ The `RenderArtifact` ABI describes semantic intent without any memory assumption
 *   **Schema:** must be versioned.
 *   **Validation:** happens synchronously at `HostApi::publish_artifact()`. Malformed artifacts are rejected before reaching the broker.
 
+### Artifact Lifecycle
+*   `Generate` → `Publish` → `Stage` → `Consume` → `Drop`
+*   No caching allowed. Artifacts cannot survive frame boundaries (enforced by **I012**) to prevent async execution from overwriting newer frames.
+
 ```rust
 pub enum RenderArtifact {
     None,
@@ -144,8 +151,8 @@ pub enum RenderArtifact {
         region: [f32; 4],
     },
     Custom {
-        schema_name: String,
-        data: serde_json::Value,
+        schema_id: u64,
+        rows: Vec<SemanticRow>,
     }
 }
 
@@ -186,8 +193,9 @@ pub enum SemanticValue {
 *   Pools buffer allocations to prevent per-frame GPU memory thrashing.
 
 **Lifecycle:**
-State progression: `Allocated` → `Active` → `Stale` → `Grace Window` → `Collected`
+State progression: `Allocated` → `Warm` → `Active` → `Stale` → `Grace Window` → `Collected`
 
+*   **Warm:** Resource exists, materialized, not consumed yet. Used for hot reload, atlas preload, and shader recompilation.
 *   **Eviction:** An epoch change does not instantly destroy resources.
 *   **Hot Reload:** Absolutely safe; resources persist through the Grace Window.
 *   **Persistent Assets:** Atlas and shared textures remain persistent and bypass ephemeral eviction.
@@ -201,20 +209,20 @@ State progression: `Allocated` → `Active` → `Stale` → `Grace Window` → `
     *   **Implementation:** Reverted
     *   **Validation:** Not Started
     *   **Reason:** Prevent architecture drift. Prototype was completed before architecture freeze.
-    *   *Details:* Rename `FilterNode` → `RenderNode`. Migrate builtins (CRT, DotRenderer).
+    *   *Details:* Introduce `RenderGraph` skeleton. Keep `FilterNode` internally. No public API rename. No execution change. No migration yet. Avoid premature trait mutation chains (see **D006**).
 
 *   **Phase 2: Execution Plan**
     *   **Status:** Accepted
     *   **Implementation:** Reverted
     *   **Validation:** Not Started
     *   **Reason:** Prevent architecture drift.
-    *   *Details:* Introduce `RenderGraph`, `ExecutionPlan`, and `PlanEpoch`. Separate compilation from execution.
+    *   *Details:* Introduce `ExecutionPlan` and `PlanEpoch`. Separate compilation from execution.
 
 *   **Phase 3: Semantic Artifact ABI**
     *   **Status:** Planned
     *   **Implementation:** Not Started
     *   **Validation:** Not Started
-    *   *Details:* Implement `RenderArtifact` and `SemanticRow` in the shared addon library. Wire `HostApi::publish_artifact()`.
+    *   *Details:* Implement `RenderArtifact` and `SemanticRow` in the shared addon library. Wire `HostApi::publish_artifact()`. Perform `RenderNode` public trait rename here, once boundaries exist.
 
 *   **Phase 4: Resource Broker**
     *   **Status:** Planned
@@ -249,10 +257,18 @@ Each Phase must pass these gates before merging:
 3.  **Memory:** Broker must not leak `wgpu::Buffer`s across epochs.
 4.  **FPS:** Must maintain 60FPS on base webcam feed.
 5.  **Ownership:** No `wgpu` types may exist in the `addons/msdf/` source code.
+6.  **Determinism Gate:** Same artifact + same signals = identical output. Failure blocks merge.
+    *   **Metric (`frame_hash`):** Captures draw count, broker allocations, and render output hash.
 
 ---
 
 ## 12 Implementation Journal
+
+**Architecture Status ≠ Implementation Status**
+*   `Accepted` ≠ implemented
+*   `Implemented` ≠ validated
+*   `Validated` ≠ frozen
+*   `Reverted` ≠ rejected
 
 *Format: YYYY-MM-DD | Context | Decision | Consequence | Status*
 
@@ -266,6 +282,12 @@ Each Phase must pass these gates before merging:
 
 **MSDF**
 *   Acceptance: Renders crisp text, follows graph order, survives hot-reload.
+*   **Strict Entry Point:**
+    ```text
+    ExecutionUnit → RenderArtifact → ResourceBroker → Proxy RenderNode → GPU
+    ```
+    *   **Forbidden:** `addons/msdf/*` → `wgpu`
+    *   **Forbidden:** `RenderRuntime` → load native runtime
 
 **Particles**
 *   Acceptance: Supports 10,000+ instances driven by `SemanticRow` outputs from a WASM physics behavior.
