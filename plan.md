@@ -34,7 +34,7 @@ A single unified Execution Platform runs all external logic (Behaviors and Rende
 | ID | Title | Status | Reason | Impact |
 | :--- | :--- | :--- | :--- | :--- |
 | **D001** | Single Execution Platform | **Accepted** | BehaviorRuntime and RenderRuntime must not duplicate process/WASM lifecycles. Execution Platform handles all `.so`/WASM loading. | Unifies supervisor, sandbox, and IPC. |
-| **D002** | RenderNode Replaces FilterNode | **Accepted** | Temporary wrappers (`FilterCompat`) create massive long-term tech debt. | Intentional compile break across all builtins. Clean migration. |
+| **D002** | Render Graph Migration | **Accepted** | Temporary wrappers (`FilterCompat`) create massive long-term tech debt. FilterNode removal remains target state, deferred until RenderArtifact ABI, ResourceBroker, and Execution Platform integration exist. | Intentional compile break across all builtins. Clean migration. Avoids multiple public trait mutations. |
 | **D003** | Engine Owns GPU | **Accepted** | Allowing addons to allocate buffers directly causes resource leaks, OOMs, and state desyncs. | Addons use Broker; zero direct `wgpu` access. |
 | **D004** | Artifact Model | **Accepted** | ExecutionUnit logic must not ruin graph order. Artifacts stay graph-local to guarantee pipeline composition (e.g., Overlay → CRT → Bloom). | Purity of execution order. |
 | **D005** | Semantic Payload | **Accepted** | `Vec<u8>` leaks GPU memory padding/alignment into addons, causing ABI breakage if engine GPU packing changes. | Addons describe *what*; Broker handles *how* (packing). |
@@ -143,7 +143,7 @@ pub enum RenderArtifact {
         vertices: Vec<SemanticRow>,
     },
     Overlay {
-        content: String,
+        content: OverlayContent,
         bounds: [f32; 4],
     },
     AtlasReference {
@@ -153,6 +153,18 @@ pub enum RenderArtifact {
     Custom {
         schema_id: u64,
         rows: Vec<SemanticRow>,
+    }
+}
+
+pub enum OverlayContent {
+    Text(String),
+    Icon(String),
+    AtlasRegion {
+        asset: String,
+        region: [f32; 4],
+    },
+    Custom {
+        schema_id: u64,
     }
 }
 
@@ -183,6 +195,21 @@ pub enum SemanticValue {
 }
 ```
 
+### Internal Materialization Policy
+
+**Rules:**
+The Broker MAY:
+*   Normalize rows
+*   Transform AoS (Array of Structs) → SoA (Struct of Arrays)
+*   Repack memory
+*   Batch uploads
+
+The Broker MUST NOT:
+*   Mutate semantic meaning
+*   Reorder visible output
+
+*Reason:* Provides optimization freedom for large-scale particles, MSDF batching, and future 3D overlays without changing the ABI.
+
 ---
 
 ## 8 ResourceBroker
@@ -197,8 +224,16 @@ State progression: `Allocated` → `Warm` → `Active` → `Stale` → `Grace Wi
 
 *   **Warm:** Resource exists, materialized, not consumed yet. Used for hot reload, atlas preload, and shader recompilation.
 *   **Eviction:** An epoch change does not instantly destroy resources.
+*   **Grace Window Rules:** A resource exits Grace Window and is `Collected` if:
+    *   `frames_unused > threshold` OR
+    *   `memory_pressure > limit`
 *   **Hot Reload:** Absolutely safe; resources persist through the Grace Window.
-*   **Persistent Assets:** Atlas and shared textures remain persistent and bypass ephemeral eviction.
+*   **Persistent Assets:** Atlas and static textures must explicitly opt in to persistence to prevent immortal cache growth.
+
+**Broker Authority:**
+*   **Broker owns:** packing, stride, padding, upload batching, allocation growth.
+*   **Broker never owns:** graph order, execution timing, addon lifecycle.
+*   *Reason:* Prevent Broker becoming a hidden scheduler.
 
 ---
 
@@ -259,6 +294,9 @@ Each Phase must pass these gates before merging:
 5.  **Ownership:** No `wgpu` types may exist in the `addons/msdf/` source code.
 6.  **Determinism Gate:** Same artifact + same signals = identical output. Failure blocks merge.
     *   **Metric (`frame_hash`):** Captures draw count, broker allocations, and render output hash.
+7.  **Artifact Purity Gate:** Same input → same artifact → same output.
+    *   Artifacts must remain immutable after publish. Broker materialization cannot mutate artifact. Failure blocks merge.
+    *   **Metrics:** `artifact_hash`, `frame_hash`, `allocation_count`.
 
 ---
 
@@ -305,3 +343,22 @@ Each Phase must pass these gates before merging:
 *   `Superseded` ≠ deleted.
 *   `Rejected` ≠ removed.
 *   Implementation files must explicitly reference **Decision IDs** in code comments or PR descriptions.
+
+---
+
+## 15 Freeze Scope
+
+**Allowed:**
+*   Artifact ABI
+*   Broker internals
+*   Validation
+
+**Forbidden until Phase 3 complete:**
+*   New render roles
+*   New capability flags
+*   MSDF optimization
+*   New runtime
+*   Graph branching
+*   Multi-window
+
+*Reason:* Stop endless architecture expansion.
