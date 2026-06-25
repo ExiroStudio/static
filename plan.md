@@ -84,6 +84,10 @@ A single unified Execution Platform runs all external logic (Behaviors and Rende
 *   **I013:** Artifact schema resolution must be amortized. Per-frame schema reconstruction forbidden.
 *   **I014:** Broker materializes. Broker never computes.
 *   **I015:** ExecutionPlan compilation must be deterministic.
+*   **I016:** Execution path must not depend on string identity.
+*   **I017:** Artifacts cannot force frame starvation.
+*   **I018:** Frame execution cannot mutate compile topology.
+*   **I019:** Materialization must be replayable.
 
 Implementation violating an invariant must stop.
 
@@ -147,12 +151,12 @@ pub enum RenderArtifact {
         topology: PrimitiveTopology,
         vertices: SemanticRows,
     },
-    Overlay {
-        content: OverlayContent,
+    Visual {
+        content: VisualContent,
         bounds: [f32; 4],
     },
     AtlasReference {
-        asset_name: String,
+        asset_id: u64,
         region: [f32; 4],
     },
     Custom {
@@ -161,14 +165,14 @@ pub enum RenderArtifact {
     }
 }
 
-pub enum OverlayContent {
+pub enum VisualContent {
     Text {
         content: String,
         mode: TextMode,
     },
     Icon(String),
     AtlasRegion {
-        asset: String,
+        asset_id: u64,
         region: [f32; 4],
     },
     Custom {
@@ -184,11 +188,11 @@ pub enum TextMode {
 
 pub struct SemanticRows {
     pub schema_id: u64,
-    pub rows: std::sync::Arc<[SemanticRow]>,
+    pub rows: Vec<SemanticRow>, // Broker may convert internally to Arc/Cow/Arena/SoA. ABI remains runtime-neutral.
 }
 
 pub struct InstanceSchema {
-    pub kind: String, // e.g., "glyph", "particle"
+    pub schema_id: u64,
     pub fields: Vec<SemanticField>,
 }
 
@@ -255,6 +259,15 @@ State progression: `Allocated` → `Warm` → `Active` → `Stale` → `Grace Wi
 *   **Broker never owns:** graph order, execution timing, addon lifecycle.
 *   *Reason:* Prevent Broker becoming a hidden scheduler or executing render logic.
 
+**Epoch Ownership Rules:**
+*   **FrameEpoch owns:** artifact, materialization.
+*   **PlanEpoch owns:** allocation, routing, cache.
+*   **Forbidden:** FrameEpoch modifying PlanEpoch. (Enforced by **I018**)
+
+**Materialization Contract:**
+`Materialize(artifact, target_layout) → PhysicalResource`
+*   **Rules:** Pure, deterministic, idempotent, cacheable.
+
 ---
 
 ## 9 Migration Timeline
@@ -320,6 +333,10 @@ Each Phase must pass these gates before merging:
 8.  **Compile Epoch Gate:** Same graph → same compile → same execution_plan → same plan_hash.
     *   Mismatch = BLOCK.
     *   **Metrics:** `plan_hash`, `allocation_hash`, `frame_hash`.
+9.  **Artifact Budget Gate:**
+    *   **Rules:** Single artifact size ≤ configurable limit. Frame total artifact ≤ frame budget.
+    *   **Overflow:** Drop newest, emit warning, never stall render.
+    *   **Metrics:** `artifact_bytes`, `artifact_rows`, `broker_upload_ms`.
 
 ---
 
@@ -392,3 +409,19 @@ Each Phase must pass these gates before merging:
 *   Multi-window
 
 *Reason:* Stop endless architecture expansion.
+
+---
+
+## 16 Architecture Freeze Exit
+
+**Phase 3 complete ONLY IF:**
+*   `HostApi::publish_artifact()` exists
+*   Artifact ABI is stable
+*   Broker materialization is implemented
+*   Zero direct `wgpu` usage in addons
+*   MSDF prototype boots
+
+**Until then:**
+*   NO new abstractions.
+*   NO capability expansion.
+*   NO new roles.
