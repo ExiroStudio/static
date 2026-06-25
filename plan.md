@@ -66,7 +66,24 @@ A single unified Execution Platform runs all external logic (Behaviors and Rende
 
 ---
 
-## 5 Final Runtime Blueprint
+## 5 Architecture Invariants
+
+*   **I001:** ExecutionUnit never owns GPU.
+*   **I002:** Render ordering changes only in ExecutionPlan.
+*   **I003:** Artifacts remain semantic.
+*   **I004:** Broker performs materialization.
+*   **I005:** ExecutionPlatform never records draw commands.
+*   **I006:** `compile()` immutable per frame.
+*   **I007:** Nodes remain graph-local.
+*   **I008:** Resource ownership survives hot reload.
+*   **I009:** Decision history cannot be rewritten.
+*   **I010:** Architecture status independent from implementation.
+
+Implementation violating an invariant must stop.
+
+---
+
+## 6 Final Runtime Blueprint
 
 ```text
 [Execution Platform]
@@ -95,9 +112,17 @@ A single unified Execution Platform runs all external logic (Behaviors and Rende
 
 ---
 
-## 6 Artifact Specification
+## 7 Artifact Specification
 
 The `RenderArtifact` ABI describes semantic intent without any memory assumptions. No `Vec<u8>`, no raw bytes, no resource IDs.
+
+### Artifact Validation Rules
+*   **Rows count:** must strictly match schema bounds.
+*   **Field order:** is immutable.
+*   **Missing field:** reject immediately.
+*   **Extra field:** reject immediately.
+*   **Schema:** must be versioned.
+*   **Validation:** happens synchronously at `HostApi::publish_artifact()`. Malformed artifacts are rejected before reaching the broker.
 
 ```rust
 pub enum RenderArtifact {
@@ -153,7 +178,7 @@ pub enum SemanticValue {
 
 ---
 
-## 7 ResourceBroker
+## 8 ResourceBroker
 
 **Responsibilities:**
 *   Translates semantic `RenderArtifact`s into physical GPU `Buffer`s.
@@ -161,36 +186,53 @@ pub enum SemanticValue {
 *   Pools buffer allocations to prevent per-frame GPU memory thrashing.
 
 **Lifecycle:**
-*   Allocations are tied to the `PlanEpoch`.
-*   **Growth:** Buffers dynamically resize if `rows.len()` exceeds current capacity.
-*   **Eviction:** When the `RenderGraph::compile()` advances the `PlanEpoch`, the Broker sweeps and drops any buffer cache keys associated with the old epoch.
+State progression: `Allocated` → `Active` → `Stale` → `Grace Window` → `Collected`
+
+*   **Eviction:** An epoch change does not instantly destroy resources.
+*   **Hot Reload:** Absolutely safe; resources persist through the Grace Window.
+*   **Persistent Assets:** Atlas and shared textures remain persistent and bypass ephemeral eviction.
 
 ---
 
-## 8 Migration Timeline
+## 9 Migration Timeline
 
-*   **Phase 1: Clean Break** (Status: **COMPLETED**)
-    *   Renamed `FilterNode` → `RenderNode`.
-    *   Migrated builtins (CRT, DotRenderer).
-    *   Compile break resolved.
-*   **Phase 2: Execution Plan** (Status: **COMPLETED**)
-    *   Introduced `RenderGraph`, `ExecutionPlan`, and `PlanEpoch`.
-    *   Separated compilation from execution.
-*   **Phase 3: Semantic Artifact ABI** (Status: PENDING)
-    *   Implement `RenderArtifact` and `SemanticRow` in the shared addon library.
-    *   Wire `HostApi::publish_artifact()`.
-*   **Phase 4: Resource Broker** (Status: PENDING)
-    *   Implement `ResourceBroker` memory management.
-    *   Implement the semantic-to-physical packing algorithm.
-*   **Phase 5: MSDF Implementation** (Status: PENDING)
-    *   Build the generic `InstancedOverlayNode` proxy.
-    *   Implement MSDF entirely as a CPU-based `ExecutionUnit`.
+*   **Phase 1: Clean Break**
+    *   **Status:** Accepted
+    *   **Implementation:** Reverted
+    *   **Validation:** Not Started
+    *   **Reason:** Prevent architecture drift. Prototype was completed before architecture freeze.
+    *   *Details:* Rename `FilterNode` → `RenderNode`. Migrate builtins (CRT, DotRenderer).
+
+*   **Phase 2: Execution Plan**
+    *   **Status:** Accepted
+    *   **Implementation:** Reverted
+    *   **Validation:** Not Started
+    *   **Reason:** Prevent architecture drift.
+    *   *Details:* Introduce `RenderGraph`, `ExecutionPlan`, and `PlanEpoch`. Separate compilation from execution.
+
+*   **Phase 3: Semantic Artifact ABI**
+    *   **Status:** Planned
+    *   **Implementation:** Not Started
+    *   **Validation:** Not Started
+    *   *Details:* Implement `RenderArtifact` and `SemanticRow` in the shared addon library. Wire `HostApi::publish_artifact()`.
+
+*   **Phase 4: Resource Broker**
+    *   **Status:** Planned
+    *   **Implementation:** Not Started
+    *   **Validation:** Not Started
+    *   *Details:* Implement `ResourceBroker` memory management. Implement the semantic-to-physical packing algorithm.
+
+*   **Phase 5: MSDF Implementation**
+    *   **Status:** Planned
+    *   **Implementation:** Not Started
+    *   **Validation:** Not Started
+    *   *Details:* Build the generic `InstancedOverlayNode` proxy. Implement MSDF entirely as a CPU-based `ExecutionUnit`.
 
 **Rollback Strategy:** Atomic `git reset --hard` to phase-aligned commits.
 
 ---
 
-## 9 Risk Ledger
+## 10 Risk Ledger
 
 | Risk ID | Severity | Mitigation | Status |
 | :--- | :--- | :--- | :--- |
@@ -199,7 +241,7 @@ pub enum SemanticValue {
 
 ---
 
-## 10 Validation Gates
+## 11 Validation Gates
 
 Each Phase must pass these gates before merging:
 1.  **Compile:** `cargo check` and `cargo test` must be GREEN (no new failures).
@@ -210,15 +252,17 @@ Each Phase must pass these gates before merging:
 
 ---
 
-## 11 Implementation Journal
+## 12 Implementation Journal
 
-*   **2026-06-25** — Phase 1 Completed. Trait `FilterNode` replaced. (Decision Ref: D002)
-*   **2026-06-25** — Phase 2 Completed. `ExecutionPlan` introduced. Ordering separated from execution.
-*   **2026-06-25** — Artifact Model finalized to be purely semantic (No `Vec<u8>`). (Decision Ref: D005)
+*Format: YYYY-MM-DD | Context | Decision | Consequence | Status*
+
+*   **2026-06-25** | Initial RenderNode trait swap | D002 | Compile break resolved | **Reverted** (Implementation ahead of architecture)
+*   **2026-06-25** | PlanEpoch and ExecutionPlan added | D004 | Node ordering separated from execution | **Reverted** (Implementation ahead of architecture)
+*   **2026-06-25** | Finalized Artifact Model | D005 | Replaced `Vec<u8>` with `SemanticRow` | **Accepted**
 
 ---
 
-## 12 Future Extensions
+## 13 Future Extensions
 
 **MSDF**
 *   Acceptance: Renders crisp text, follows graph order, survives hot-reload.
@@ -228,3 +272,14 @@ Each Phase must pass these gates before merging:
 
 **3D Overlays**
 *   Acceptance: Supports `SemanticField::Position3` gracefully mapping to a basic depth-tested proxy node.
+
+---
+
+## 14 plan.md Governance
+
+*   Architecture can evolve.
+*   History cannot disappear.
+*   Old decisions remain visible.
+*   `Superseded` ≠ deleted.
+*   `Rejected` ≠ removed.
+*   Implementation files must explicitly reference **Decision IDs** in code comments or PR descriptions.
