@@ -274,23 +274,23 @@ State progression: `Allocated` → `Warm` → `Active` → `Stale` → `Grace Wi
 
 *   **Phase 1: Clean Break**
     *   **Status:** Accepted
-    *   **Implementation:** Reverted
-    *   **Validation:** Not Started
+    *   **Implementation:** Implemented
+    *   **Validation:** cargo check GREEN, cargo test (unit tests) GREEN
     *   **Reason:** Prevent architecture drift. Prototype was completed before architecture freeze.
-    *   *Details:* Introduce `RenderGraph` skeleton. Keep `FilterNode` internally. No public API rename. No execution change. No migration yet. Avoid premature trait mutation chains (see **D006**).
+    *   *Details:* Introduced `RenderGraph` skeleton (`src/runtime/graph.rs`). `RenderGraph` wraps `FilterNode` instances with graph-local slot ordering. `PipelineRuntime` now owns a `RenderGraph` instead of `Vec<Box<dyn FilterNode>>`. No public API rename — `FilterNode` persists internally (D006). Execution semantics unchanged.
 
 *   **Phase 2: Execution Plan**
     *   **Status:** Accepted
-    *   **Implementation:** Reverted
-    *   **Validation:** Not Started
+    *   **Implementation:** Implemented
+    *   **Validation:** cargo check GREEN, plan_hash determinism tests GREEN
     *   **Reason:** Prevent architecture drift.
-    *   *Details:* Introduce `ExecutionPlan` and `PlanEpoch`. Separate compilation from execution.
+    *   *Details:* Introduced `PlanEpoch` and `ExecutionPlan` (`src/runtime/plan.rs`). `PipelineRuntime::build()` now calls `ExecutionPlan::compile()` after node instantiation. `render()` reads `node_count` from the plan without mutating topology (I018). `plan_hash` computed deterministically (I015).
 
 *   **Phase 3: Semantic Artifact ABI**
     *   **Status:** Planned
-    *   **Implementation:** Not Started
-    *   **Validation:** Not Started
-    *   *Details:* Implement `RenderArtifact` and `SemanticRow` in the shared addon library. Wire `HostApi::publish_artifact()`. Perform `RenderNode` public trait rename here, once boundaries exist.
+    *   **Implementation:** Implemented
+    *   **Validation:** All artifact validation unit tests GREEN (24 tests in artifact.rs + host_api.rs)
+    *   *Details:* Implemented `RenderArtifact`, `SemanticRow`, `SemanticRows`, `InstanceSchema`, `SemanticField`, `SemanticValue`, `VisualContent`, `TextMode`, `PrimitiveTopology`, `ArtifactBudget`, `ArtifactValidationError` in `src/runtime/artifact.rs`. Implemented `HostApi`, `PublishError`, `StagedArtifact` in `src/runtime/host_api.rs`. `HostApi::publish_artifact()` is the only legal publish path. Validation is synchronous (§7). Epoch guard enforces I012. Budget guard enforces I017. No wgpu imports in artifact.rs (enforces I001/D003 at compile time). Public trait rename (`RenderNode`) deferred — `FilterNode` still used internally per D006.
 
 *   **Phase 4: Resource Broker**
     *   **Status:** Planned
@@ -354,6 +354,10 @@ Each Phase must pass these gates before merging:
 *   **2026-06-25** | Initial RenderNode trait swap | D002 | Compile break resolved | **Reverted** (Implementation ahead of architecture)
 *   **2026-06-25** | PlanEpoch and ExecutionPlan added | D004 | Node ordering separated from execution | **Reverted** (Implementation ahead of architecture)
 *   **2026-06-25** | Finalized Artifact Model | D005 | Replaced `Vec<u8>` with `SemanticRow` | **Accepted**
+*   **2026-06-26** | Phase 1: RenderGraph skeleton | D002, D006 | `src/runtime/graph.rs` created. `PipelineRuntime` owns `RenderGraph` instead of `Vec<Box<dyn FilterNode>>`. Sequential slot ordering. No public API rename. `cargo check` GREEN. | **Implemented**
+*   **2026-06-26** | Phase 2: ExecutionPlan + PlanEpoch | D004, I002, I006, I015, I018 | `src/runtime/plan.rs` created. `build()` compiles immutable `ExecutionPlan`. `render()` reads plan without mutating topology. Deterministic `plan_hash`. | **Implemented**
+*   **2026-06-26** | Phase 3: Semantic Artifact ABI | D003, D005, I001–I019 | `src/runtime/artifact.rs` + `src/runtime/host_api.rs` created. Full `RenderArtifact` type hierarchy from §7. `HostApi::publish_artifact()` wired. No wgpu in artifact layer (I001). Synchronous validation. Budget enforcement (I017). Epoch guard (I012). | **Implemented**
+*   **2026-06-26** | Pre-existing smoke.rs compile fix | N/A | Fixed 3 pre-existing compile errors in `smoke.rs` and 1 in `behavior/host.rs` (unrelated to architecture). Compilation now GREEN. 158 tests pass. | **Fixed**
 
 ---
 
