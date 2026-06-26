@@ -1,6 +1,6 @@
-# Ascii Realtime Engine
+# Static Engine
 
-Welcome to the **ascii-realtime** engine repository. 
+Welcome to the **static** engine repository. 
 
 ## 1. Project Overview
 

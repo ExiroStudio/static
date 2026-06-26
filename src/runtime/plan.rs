@@ -41,6 +41,11 @@ impl PlanEpoch {
     pub(crate) fn next(self) -> PlanEpoch {
         PlanEpoch(self.0.saturating_add(1))
     }
+
+    /// Raw `u64` value. Used by `ResourceBroker` for `BrokerKey` construction.
+    pub fn raw(self) -> u64 {
+        self.0
+    }
 }
 
 impl Default for PlanEpoch {

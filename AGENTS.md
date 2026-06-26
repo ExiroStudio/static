@@ -1,6 +1,6 @@
 # AGENTS.md — Architectural Constitution
 
-This document is the architectural constitution of the `ascii-realtime` repository. Its audience is both human contributors and AI coding assistants. It explicitly defines the boundaries, responsibilities, and forbidden operations within the codebase.
+This document is the architectural constitution of the `static` repository. Its audience is both human contributors and AI coding assistants. It explicitly defines the boundaries, responsibilities, and forbidden operations within the codebase.
 
 ## 1. Core Philosophy
 

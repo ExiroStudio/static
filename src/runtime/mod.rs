@@ -25,10 +25,12 @@
 //!   legal path for addon logic to submit render intent.
 
 pub mod artifact;
+pub mod broker;
 pub mod context;
 pub mod graph;
 pub mod host;
 pub mod host_api;
+pub mod packing;
 pub mod plan;
 pub mod signals_group;
 pub mod sink;
@@ -61,6 +63,11 @@ pub use artifact::{
     SemanticField, SemanticRow, SemanticRows, SemanticValue, TextMode, VisualContent,
 };
 pub use host_api::{HostApi, PublishError, StagedArtifact};
+// Phase 4 (D003, I014, I020) — ResourceBroker.
+pub use broker::{
+    BrokerKey, BrokerMetrics, MaterializeError, MaterializedHandle, ResourceBroker,
+};
+pub use packing::{LayoutPlan, PackingProfile, PackingResult};
 use host::HostUniform;
 use sink::WindowSink;
 use targets::RenderTarget;
@@ -114,6 +121,12 @@ pub struct PipelineRuntime {
     /// successful `build()`. Replaced atomically on each rebuild (I018).
     current_plan: Option<ExecutionPlan>,
 
+    // ---- Phase 4 (D003, I014, I016, I020): ResourceBroker ----------------------
+    /// GPU buffer lifecycle manager. The Broker is the **only** entity that
+    /// calls `device.create_buffer()` or `queue.write_buffer()` for dynamic
+    /// render data (D003, I001). All addons go through RenderArtifact → Broker.
+    broker: ResourceBroker,
+
     /// Number of successful pipeline (re)builds. Used by the spike to assert
     /// that signal-driven updates never trigger a rebuild.
     build_count: u64,
@@ -152,6 +165,8 @@ impl PipelineRuntime {
             // Phase 2 (D004, I006)
             current_epoch: PlanEpoch::ZERO,
             current_plan: None,
+            // Phase 4 (D003, I014, I016, I020): 64 MiB default budget.
+            broker: ResourceBroker::new(64 * 1024 * 1024),
             build_count: 0,
         }
     }
@@ -402,6 +417,12 @@ impl PipelineRuntime {
         time: f32,
         signals: &SignalSnapshot,
     ) {
+        // Phase 4 (I020): Prepare Phase begins here. The Broker is the ONLY
+        // entity that may call create_buffer or write_buffer for dynamic data.
+        // begin_frame() transitions Active → Idle for stale resources so the
+        // Grace Window sweeper can reclaim them post-frame.
+        self.broker.begin_frame();
+
         self.host.upload(queue, self.size, time);
 
         // Phase 2 (I002, I018): read the compiled plan. Execution cannot mutate
@@ -459,6 +480,17 @@ impl PipelineRuntime {
         self.sink.blit(&mut encoder, final_bg, surface_view);
 
         queue.submit(Some(encoder.finish()));
+
+        // Phase 4 (I020): Post-frame sweep. Evict idle resources whose Grace
+        // Window has expired. Called AFTER submit so GPU work is already queued;
+        // dropping the buffer here is safe because the GPU references a handle,
+        // not the Rust object. Buffers in Active state are never evicted.
+        self.broker.sweep();
+    }
+
+    /// Read-only access to the Broker for diagnostics / debug visualizer.
+    pub fn broker(&self) -> &ResourceBroker {
+        &self.broker
     }
 }
 
