@@ -269,6 +269,7 @@ fn behavior_thread_survives_a_reload_and_keeps_publishing() {
         publisher2,
         schema.clone(),
         vec![builtins::time::init_with("beh-time".into(), Default::default(), true)],
+        false,
     );
 
     let mut waited = 0;
@@ -341,7 +342,7 @@ fn behavior_host_resolves_external_factory_by_lookup() {
         enabled: true,
         config: ParamMap::new(),
     }];
-    let inits = BehaviorHost::create_inits(&reg, &behaviors);
+    let (inits, _skipped) = BehaviorHost::create_inits(&reg, &behaviors);
 
     assert_eq!(inits.len(), 1, "factory lookup must create exactly one init");
     assert_eq!(inits[0].instance_id, "beh-face");
@@ -358,7 +359,7 @@ fn external_behavior_executes_through_the_host_and_publishes() {
 
     let mut reg = BehaviorRegistry::new();
     reg.register("face-tracking-lite", face_tracking_lite::init_with);
-    let inits = BehaviorHost::create_inits(
+    let (inits, _skipped) = BehaviorHost::create_inits(
         &reg,
         &[NodeConfig {
             instance_id: "beh-face".into(),
@@ -506,7 +507,9 @@ fn face_behavior_survives_reload_and_keeps_publishing() {
         publisher2,
         schema.clone(),
         vec![face_tracking_lite::init_with("beh-face".into(), Default::default(), true)],
+        false,
     );
+
     let mut waited = 0;
     while reader2.published() == 0 && waited < 200 {
         thread::sleep(Duration::from_millis(5));

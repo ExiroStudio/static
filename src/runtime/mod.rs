@@ -11,12 +11,27 @@
 //! [`AddonRegistry`], instantiates it through the addon's own factory, and
 //! executes the nodes in order, passing a [`FrameContext`] between them via two
 //! ping-pong GPU targets. It special-cases nothing: builtin and (future)
-//! external addons run through the identical [`FilterNode`] interface. There
-//! is no graph compilation, no dependency resolution, no scheduler — just
-//! sequential execution.
+//! external addons run through the identical [`FilterNode`] interface.
+//!
+//! # Architecture phases wired here
+//!
+//! - **Phase 1 (D002, D006):** [`graph`] — `RenderGraph` skeleton wraps the
+//!   node list with graph-local slot ordering. `FilterNode` is kept internally;
+//!   no public rename yet.
+//! - **Phase 2 (D004, I002, I006, I015, I018):** [`plan`] — `ExecutionPlan` +
+//!   `PlanEpoch`. `build()` compiles an immutable plan; `render()` executes it.
+//! - **Phase 3 (D003, D005, I001–I019):** [`artifact`] + [`host_api`] —
+//!   Semantic `RenderArtifact` ABI. `HostApi::publish_artifact()` is the only
+//!   legal path for addon logic to submit render intent.
 
+pub mod artifact;
+pub mod broker;
 pub mod context;
+pub mod graph;
 pub mod host;
+pub mod host_api;
+pub mod packing;
+pub mod plan;
 pub mod signals_group;
 pub mod sink;
 pub mod targets;
@@ -38,6 +53,21 @@ pub use context::{
     ResolvedConfig, SignalContext,
 };
 pub use signals_group::{signals_layout, SignalsBinding};
+// Phase 1 (D002, D006) — RenderGraph skeleton.
+pub use graph::RenderGraph;
+// Phase 2 (D004, I006) — ExecutionPlan + PlanEpoch.
+pub use plan::{ExecutionPlan, PlanEpoch};
+// Phase 3 (D003, D005) — Semantic Artifact ABI.
+pub use artifact::{
+    ArtifactBudget, ArtifactValidationError, InstanceSchema, PrimitiveTopology, RenderArtifact,
+    SemanticField, SemanticRow, SemanticRows, SemanticValue, TextMode, VisualContent,
+};
+pub use host_api::{HostApi, PublishError, StagedArtifact};
+// Phase 4 (D003, I014, I020) — ResourceBroker.
+pub use broker::{
+    BrokerKey, BrokerMetrics, MaterializeError, MaterializedHandle, ResourceBroker,
+};
+pub use packing::{LayoutPlan, PackingProfile, PackingResult};
 use host::HostUniform;
 use sink::WindowSink;
 use targets::RenderTarget;
@@ -79,8 +109,23 @@ pub struct PipelineRuntime {
 
     sink: WindowSink,
 
-    /// The live, instantiated pipeline. Empty until [`build`](Self::build).
-    nodes: Vec<Box<dyn FilterNode>>,
+    // ---- Phase 1 (D002, D006): RenderGraph skeleton ----------------------------
+    /// The live, instantiated pipeline wrapped in a `RenderGraph` for
+    /// graph-local slot ordering. `FilterNode` is preserved internally (D006).
+    graph: RenderGraph,
+
+    // ---- Phase 2 (D004, I002, I006, I015, I018): ExecutionPlan -----------------
+    /// Current monotonic epoch. Incremented on every successful `build()`.
+    current_epoch: PlanEpoch,
+    /// The compiled plan for the current epoch. `None` until the first
+    /// successful `build()`. Replaced atomically on each rebuild (I018).
+    current_plan: Option<ExecutionPlan>,
+
+    // ---- Phase 4 (D003, I014, I016, I020): ResourceBroker ----------------------
+    /// GPU buffer lifecycle manager. The Broker is the **only** entity that
+    /// calls `device.create_buffer()` or `queue.write_buffer()` for dynamic
+    /// render data (D003, I001). All addons go through RenderArtifact → Broker.
+    broker: ResourceBroker,
 
     /// Number of successful pipeline (re)builds. Used by the spike to assert
     /// that signal-driven updates never trigger a rebuild.
@@ -115,7 +160,13 @@ impl PipelineRuntime {
             bg_targets,
             bg_source: None,
             sink,
-            nodes: Vec::new(),
+            // Phase 1 (D002, D006)
+            graph: RenderGraph::new(),
+            // Phase 2 (D004, I006)
+            current_epoch: PlanEpoch::ZERO,
+            current_plan: None,
+            // Phase 4 (D003, I014, I016, I020): 64 MiB default budget.
+            broker: ResourceBroker::new(64 * 1024 * 1024),
             build_count: 0,
         }
     }
@@ -243,7 +294,8 @@ impl PipelineRuntime {
         }
 
         // Instantiate each enabled node through its addon's own factory.
-        let mut nodes: Vec<Box<dyn FilterNode>> = Vec::new();
+        // Phase 1 (D002, D006): push into RenderGraph instead of bare Vec.
+        let mut new_graph = RenderGraph::new();
         for node in &config.pipeline {
             if !node.enabled {
                 continue;
@@ -270,10 +322,18 @@ impl PipelineRuntime {
                 // declared `consume` signals into `@group(3)` (same as builtins).
                 None => self.build_external(device, entry, &resolved, &signals)?,
             };
-            nodes.push(instance);
+            new_graph.push(instance);
         }
 
-        self.nodes = nodes;
+        // Phase 2 (D004, I006, I015): advance epoch, compile immutable plan.
+        // compile() is the only ExecutionPlan constructor — frame execution
+        // cannot mutate this plan (I018).
+        let new_epoch = self.current_epoch.next();
+        let new_plan = ExecutionPlan::compile(new_epoch, &new_graph);
+
+        self.graph = new_graph;
+        self.current_epoch = new_epoch;
+        self.current_plan = Some(new_plan);
         self.build_count += 1;
         Ok(())
     }
@@ -357,14 +417,34 @@ impl PipelineRuntime {
         time: f32,
         signals: &SignalSnapshot,
     ) {
+        // Phase 4 (I020): Prepare Phase begins here. The Broker is the ONLY
+        // entity that may call create_buffer or write_buffer for dynamic data.
+        // begin_frame() transitions Active → Idle for stale resources so the
+        // Grace Window sweeper can reclaim them post-frame.
+        self.broker.begin_frame();
+
         self.host.upload(queue, self.size, time);
+
+        // Phase 2 (I002, I018): read the compiled plan. Execution cannot mutate
+        // the graph topology — we only read node_count from the plan.
+        let node_count = self
+            .current_plan
+            .as_ref()
+            .map(|p| p.node_count)
+            .unwrap_or(0);
+        debug_assert_eq!(
+            node_count,
+            self.graph.len(),
+            "ExecutionPlan node_count must match live graph len (I015)"
+        );
 
         // Signal-binding pass: each node folds the latest snapshot into its own
         // per-frame uniforms via `queue.write_buffer`. No rebuild, no new bind
         // groups, no pipeline recompilation — just bytes uploaded to existing
         // buffers. Nodes that consume nothing do nothing here.
-        for node in self.nodes.iter_mut() {
-            node.prepare(queue, signals);
+        // Phase 1 (D002): iterate over RenderGraph nodes.
+        for gn in self.graph.nodes_mut() {
+            gn.node.prepare(queue, signals);
         }
 
         let source_bg = self
@@ -376,8 +456,8 @@ impl PipelineRuntime {
             label: Some("pipeline_encoder"),
         });
 
-        let n = self.nodes.len();
-        for (i, node) in self.nodes.iter().enumerate() {
+        let n = node_count;
+        for (i, gn) in self.graph.nodes().iter().enumerate() {
             let input_bg = if i == 0 {
                 source_bg
             } else {
@@ -389,7 +469,7 @@ impl PipelineRuntime {
                 input_bg,
                 output: &self.targets[i & 1].view,
             };
-            node.process(&mut ctx);
+            gn.node.process(&mut ctx);
         }
 
         let final_bg = if n == 0 {
@@ -400,6 +480,17 @@ impl PipelineRuntime {
         self.sink.blit(&mut encoder, final_bg, surface_view);
 
         queue.submit(Some(encoder.finish()));
+
+        // Phase 4 (I020): Post-frame sweep. Evict idle resources whose Grace
+        // Window has expired. Called AFTER submit so GPU work is already queued;
+        // dropping the buffer here is safe because the GPU references a handle,
+        // not the Rust object. Buffers in Active state are never evicted.
+        self.broker.sweep();
+    }
+
+    /// Read-only access to the Broker for diagnostics / debug visualizer.
+    pub fn broker(&self) -> &ResourceBroker {
+        &self.broker
     }
 }
 
