@@ -136,8 +136,8 @@ mod tests {
 
     fn graph_with(n: usize) -> RenderGraph {
         let mut g = RenderGraph::new();
-        for _ in 0..n {
-            g.push(Box::new(NoopNode));
+        for i in 0..n {
+            g.push(format!("node_{}", i).into(), Box::new(NoopNode));
         }
         g
     }

@@ -96,6 +96,7 @@ impl BehaviorRuntime {
         schema: Arc<SignalSchema>,
         frame: FrameSource,
         initial: Vec<BehaviorInit>,
+        artifact_tx: Option<std::sync::mpsc::Sender<(String, crate::runtime::artifact::RenderArtifact)>>,
     ) -> BehaviorHandle {
         let running = Arc::new(AtomicBool::new(true));
         let stats = Arc::new(BehaviorStatsShared::default());
@@ -107,7 +108,7 @@ impl BehaviorRuntime {
             .name("behavior".into())
             .spawn(move || {
                 let sched =
-                    BehaviorScheduler::new(publisher, schema, frame, initial, stats_thread);
+                    BehaviorScheduler::new(publisher, schema, frame, initial, stats_thread, artifact_tx);
                 sched.run(rx, flag);
             })
             .expect("failed to spawn behavior thread");
@@ -272,6 +273,7 @@ mod tests {
             schema,
             FrameSource::empty(),
             vec![builtins::time::init_with("time".into(), Default::default(), true)],
+            None,
         );
 
         // Bounded wait for the 30Hz thread to publish at least once.

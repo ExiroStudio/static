@@ -31,6 +31,8 @@ use crate::runtime::FilterNode;
 /// This type will be renamed / exposed as `RenderNode` in Phase 3 (see **D006**
 /// and §3 of `plan.md`). For now it is graph-internal only.
 pub(crate) struct RenderGraphNode {
+    /// The unique, stable addon instance ID. Used for stable ResourceBroker mapping.
+    pub(crate) instance_id: String,
     /// Stable graph-local identity for diagnostics and future `ExecutionPlan`
     /// slot assignment. Assigned once at `push` time; never reused within a
     /// single graph instance.
@@ -67,9 +69,9 @@ impl RenderGraph {
     /// Slot indices are monotonically increasing within a graph instance and
     /// are used by [`ExecutionPlan`](super::plan::ExecutionPlan) (Phase 2) for
     /// ping-pong routing. They are **not** stable across graph rebuilds.
-    pub fn push(&mut self, node: Box<dyn FilterNode>) {
+    pub fn push(&mut self, instance_id: String, node: Box<dyn FilterNode>) {
         let slot = self.nodes.len();
-        self.nodes.push(RenderGraphNode { slot, node });
+        self.nodes.push(RenderGraphNode { instance_id, slot, node });
     }
 
     /// The number of nodes in the graph.
@@ -121,9 +123,9 @@ mod tests {
     #[test]
     fn graph_slot_assignment_is_sequential() {
         let mut g = RenderGraph::new();
-        g.push(Box::new(NoopNode));
-        g.push(Box::new(NoopNode));
-        g.push(Box::new(NoopNode));
+        g.push("a".into(), Box::new(NoopNode));
+        g.push("b".into(), Box::new(NoopNode));
+        g.push("c".into(), Box::new(NoopNode));
 
         assert_eq!(g.len(), 3);
         let slots: Vec<usize> = g.nodes().iter().map(|n| n.slot).collect();

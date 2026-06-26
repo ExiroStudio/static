@@ -47,6 +47,10 @@ impl<'a> SignalContext<'a> {
         self.consume
     }
 }
+pub(crate) struct MaterializedResources<'a> {
+    pub(crate) instance_buffer: Option<&'a wgpu::Buffer>,
+    pub(crate) row_count: u32,
+}
 
 /// Everything a node needs to record one frame's worth of work.
 ///
@@ -61,7 +65,11 @@ pub struct FrameContext<'a> {
     pub input_bg: &'a BindGroup,
     /// The texture view this node must render its result into.
     pub output: &'a TextureView,
+    /// Opaque access to resources materialized by the Broker for this node.
+    pub(crate) resources: Option<MaterializedResources<'a>>,
 }
+
+impl<'a> FrameContext<'a> {}
 
 /// A live, instantiated filter node. The runtime holds these as
 /// `Box<dyn FilterNode>` and executes them in order, identically — there is

@@ -57,11 +57,16 @@ pub enum PackingProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FieldLayout {
     /// Byte size of the field value as written into the buffer.
-    pub size: usize,
+    size: usize,
     /// Alignment of this field within the struct (in bytes).
-    pub alignment: usize,
+    alignment: usize,
     /// Byte offset of this field from the start of one row.
-    pub offset: usize,
+    offset: usize,
+}
+
+impl FieldLayout {
+    pub fn size(&self) -> usize { self.size }
+    pub fn offset(&self) -> usize { self.offset }
 }
 
 /// A compiled layout plan for one artifact schema.
@@ -74,13 +79,16 @@ pub struct FieldLayout {
 #[derive(Debug, Clone)]
 pub struct LayoutPlan {
     /// Per-field layout, in schema declaration order.
-    pub fields: Vec<FieldLayout>,
+    fields: Vec<FieldLayout>,
     /// Total byte stride from the start of one row to the next (includes
     /// tail-padding to satisfy `profile` alignment requirements).
-    pub stride: usize,
+    stride: usize,
 }
 
 impl LayoutPlan {
+    pub fn fields(&self) -> &[FieldLayout] { &self.fields }
+    pub fn stride(&self) -> usize { self.stride }
+
     /// Compile a `LayoutPlan` from a field list and a packing profile.
     ///
     /// This is an **O(n fields)** operation called once per schema id per
@@ -164,9 +172,9 @@ pub fn pack_rows(dst: &mut [u8], rows: &[SemanticRow], plan: &LayoutPlan) -> Pac
     let mut bytes_written = 0usize;
 
     for (row_idx, row) in rows.iter().enumerate() {
-        let row_base = row_idx * plan.stride;
+        let row_base = row_idx * plan.stride();
 
-        for (field_idx, (value, layout)) in row.values.iter().zip(plan.fields.iter()).enumerate() {
+        for (field_idx, (value, layout)) in row.values.iter().zip(plan.fields().iter()).enumerate() {
             let _ = field_idx; // used in debug assertion only
             let dst_start = row_base + layout.offset;
             let dst_end = dst_start + layout.size;
@@ -185,12 +193,12 @@ pub fn pack_rows(dst: &mut [u8], rows: &[SemanticRow], plan: &LayoutPlan) -> Pac
             write_value(&mut dst[dst_start..dst_end], value, layout.size);
         }
 
-        bytes_written = (row_base + plan.stride).min(dst.len());
+        bytes_written = (row_base + plan.stride()).min(dst.len());
     }
 
     PackingResult {
         bytes_written,
-        stride: plan.stride,
+        stride: plan.stride(),
         rows_packed: rows.len(),
     }
 }
@@ -211,11 +219,11 @@ fn field_metrics(field: &SemanticField, profile: PackingProfile) -> (usize, usiz
 
         // Vec3 is the tricky one: std430 pads to 16; compact uses 12.
         SemanticField::Position3 => match profile {
-            PackingProfile::StorageStd430
+            PackingProfile::StorageStd430 => (16, 16), // vec3 padded to vec4
+            PackingProfile::StorageCompact
             | PackingProfile::VertexInstanced
             | PackingProfile::VertexInterleaved
-            | PackingProfile::VertexSeparated => (16, 16), // vec3 padded to vec4
-            PackingProfile::StorageCompact => (12, 4),     // tightly packed f32×3
+            | PackingProfile::VertexSeparated => (12, 4), // tightly packed f32×3
         },
 
         // CustomFloat is a single f32: 4 bytes, align 4.
@@ -283,9 +291,9 @@ mod tests {
     fn position2_packs_8_bytes() {
         let fields = vec![SemanticField::Position2];
         let plan = LayoutPlan::compile(&fields, PackingProfile::StorageStd430);
-        assert_eq!(plan.stride, 8);
-        assert_eq!(plan.fields[0].offset, 0);
-        assert_eq!(plan.fields[0].size, 8);
+        assert_eq!(plan.stride(), 8);
+        assert_eq!(plan.fields()[0].offset, 0);
+        assert_eq!(plan.fields()[0].size, 8);
 
         let rows = vec![SemanticRow {
             values: vec![SemanticValue::Vec2([1.0, 2.0])],
@@ -304,7 +312,7 @@ mod tests {
     fn color_rgba_packs_16_bytes() {
         let fields = vec![SemanticField::ColorRgba];
         let plan = LayoutPlan::compile(&fields, PackingProfile::StorageStd430);
-        assert_eq!(plan.stride, 16);
+        assert_eq!(plan.stride(), 16);
 
         let rows = vec![SemanticRow {
             values: vec![SemanticValue::Vec4([0.1, 0.2, 0.3, 1.0])],
@@ -323,7 +331,7 @@ mod tests {
     fn position3_std430_pads_to_16() {
         let fields = vec![SemanticField::Position3];
         let plan = LayoutPlan::compile(&fields, PackingProfile::StorageStd430);
-        assert_eq!(plan.stride, 16, "std430 Vec3 stride must be 16");
+        assert_eq!(plan.stride(), 16, "std430 Vec3 stride must be 16");
 
         let rows = vec![SemanticRow {
             values: vec![SemanticValue::Vec3([1.0, 2.0, 3.0])],
@@ -342,7 +350,7 @@ mod tests {
     fn position3_compact_is_12_bytes() {
         let fields = vec![SemanticField::Position3];
         let plan = LayoutPlan::compile(&fields, PackingProfile::StorageCompact);
-        assert_eq!(plan.stride, 12, "compact Vec3 stride must be 12");
+        assert_eq!(plan.stride(), 12, "compact Vec3 stride must be 12");
     }
 
     /// Mixed layout: Position2 + ColorRgba.
@@ -353,10 +361,10 @@ mod tests {
         let plan = LayoutPlan::compile(&fields, PackingProfile::StorageStd430);
         // Position2: offset=0, size=8
         // ColorRgba: align=16 → needs to start at 16, so 8 bytes pad
-        assert_eq!(plan.fields[0].offset, 0);
-        assert_eq!(plan.fields[1].offset, 16, "ColorRgba must be aligned to 16");
+        assert_eq!(plan.fields()[0].offset, 0);
+        assert_eq!(plan.fields()[1].offset, 16, "ColorRgba must be aligned to 16");
         // Stride = 16 + 16 = 32
-        assert_eq!(plan.stride, 32);
+        assert_eq!(plan.stride(), 32);
     }
 
     /// Multiple rows are correctly strided.
@@ -364,7 +372,7 @@ mod tests {
     fn multiple_rows_are_correctly_strided() {
         let fields = vec![SemanticField::CustomFloat("x".into())];
         let plan = LayoutPlan::compile(&fields, PackingProfile::StorageCompact);
-        assert_eq!(plan.stride, 4);
+        assert_eq!(plan.stride(), 4);
 
         let rows = vec![
             SemanticRow { values: vec![SemanticValue::Float(1.0)] },
@@ -418,8 +426,8 @@ mod tests {
     #[test]
     fn empty_fields_produce_zero_stride() {
         let plan = LayoutPlan::compile(&[], PackingProfile::StorageStd430);
-        assert_eq!(plan.stride, 0);
-        assert!(plan.fields.is_empty());
+        assert_eq!(plan.stride(), 0);
+        assert!(plan.fields().is_empty());
     }
 
     /// `buffer_size` matches manual calculation.

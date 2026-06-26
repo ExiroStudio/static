@@ -251,6 +251,7 @@ fn behavior_thread_survives_a_reload_and_keeps_publishing() {
         schema.clone(),
         FrameSource::empty(),
         vec![builtins::time::init_with("beh-time".into(), Default::default(), true)],
+        None,
     );
 
     // Wait for the first publish.
@@ -371,7 +372,7 @@ fn external_behavior_executes_through_the_host_and_publishes() {
 
     let schema = face_schema();
     let (publisher, reader) = SignalStore::new(&schema);
-    let handle = BehaviorRuntime::spawn(publisher, schema, FrameSource::empty(), inits);
+    let handle = BehaviorRuntime::spawn(publisher, schema, FrameSource::empty(), inits, None);
 
     let mut waited = 0;
     while reader.published() == 0 && waited < 200 {
@@ -494,6 +495,7 @@ fn face_behavior_survives_reload_and_keeps_publishing() {
         schema.clone(),
         FrameSource::empty(),
         vec![face_tracking_lite::init_with("beh-face".into(), Default::default(), true)],
+        None,
     );
     let mut waited = 0;
     while reader.published() == 0 && waited < 200 {

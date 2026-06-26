@@ -74,6 +74,44 @@ pub struct Manifest {
     /// Signals this addon consumes (filters).
     #[serde(default)]
     pub consume: Vec<SignalRef>,
+    
+    // ---- pipeline descriptor ----
+    #[serde(default)]
+    pub pipeline: Option<PipelineDecl>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineRenderer {
+    Fullscreen,
+    Instanced,
+}
+
+impl Default for PipelineRenderer {
+    fn default() -> Self {
+        Self::Fullscreen
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstanceFieldDecl {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: String, // e.g. "vec2", "vec4", "float"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstanceSchemaDecl {
+    pub schema_id: u64,
+    pub fields: Vec<InstanceFieldDecl>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineDecl {
+    #[serde(default)]
+    pub renderer: PipelineRenderer,
+    #[serde(default)]
+    pub instance_schema: Option<InstanceSchemaDecl>,
 }
 
 /// What kind of addon this is. Pipeline (filter) addons run on the render

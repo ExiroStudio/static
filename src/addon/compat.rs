@@ -53,6 +53,7 @@ mod tests {
             params: Default::default(),
             publish: vec![],
             consume: vec![],
+            pipeline: None,
         }
     }
 

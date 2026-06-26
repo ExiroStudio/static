@@ -66,8 +66,9 @@ impl std::error::Error for PublishError {}
 /// `StagedArtifact` is ephemeral — it exists only between `publish_artifact`
 /// and the broker's `materialize` call within the same frame (**I012**).
 pub struct StagedArtifact {
-    pub(crate) artifact: RenderArtifact,
-    pub(crate) epoch: PlanEpoch,
+    pub(crate) instance_id: String,
+    pub artifact: RenderArtifact,
+    epoch: PlanEpoch,
 }
 
 impl StagedArtifact {
@@ -92,7 +93,7 @@ struct FrameAccumulator {
 /// # Usage
 /// ```ignore
 /// let mut api = HostApi::new(current_epoch, ArtifactBudget::default());
-/// api.publish_artifact(artifact)?;
+/// api.publish_artifact(instance_id, artifact)?;
 /// // api is dropped at end of frame; staged artifacts passed to broker.
 /// ```
 pub struct HostApi {
@@ -139,6 +140,7 @@ impl HostApi {
     /// rather than corrupting graph ordering.
     pub fn publish_artifact(
         &mut self,
+        instance_id: String,
         artifact: RenderArtifact,
         artifact_epoch: PlanEpoch,
     ) -> Result<(), PublishError> {
@@ -171,10 +173,20 @@ impl HostApi {
         }
 
         self.accumulator.total_bytes = new_total;
-        self.staged.push(StagedArtifact {
-            artifact,
-            epoch: artifact_epoch,
-        });
+        
+        // Last-write-wins: if this instance_id already published this frame, overwrite it.
+        if let Some(existing) = self.staged.iter_mut().find(|s| s.instance_id == instance_id) {
+            #[cfg(debug_assertions)]
+            eprintln!("[host_api] warning: multiple artifacts published for instance {}", instance_id);
+            existing.artifact = artifact;
+        } else {
+            self.staged.push(StagedArtifact {
+                instance_id,
+                artifact,
+                epoch: self.current_epoch,
+            });
+        }
+
         Ok(())
     }
 
@@ -229,7 +241,7 @@ mod tests {
     fn valid_artifact_stages_successfully() {
         let epoch = PlanEpoch(1);
         let mut api = HostApi::new(epoch, ArtifactBudget::default());
-        assert!(api.publish_artifact(valid_instances_artifact(), epoch).is_ok());
+        assert!(api.publish_artifact("test1".into(), valid_instances_artifact(), epoch).is_ok());
         assert_eq!(api.staged_count(), 1);
     }
 
@@ -239,7 +251,7 @@ mod tests {
         let stale = PlanEpoch(1);
         let mut api = HostApi::new(current, ArtifactBudget::default());
         let err = api
-            .publish_artifact(valid_instances_artifact(), stale)
+            .publish_artifact("test2".into(), valid_instances_artifact(), stale)
             .unwrap_err();
         assert!(matches!(
             err,
@@ -265,7 +277,7 @@ mod tests {
             },
         };
         assert!(matches!(
-            api.publish_artifact(bad, epoch),
+            api.publish_artifact("test3".into(), bad, epoch),
             Err(PublishError::Validation(
                 ArtifactValidationError::UnversionedSchema
             ))
@@ -283,10 +295,10 @@ mod tests {
         };
         let mut api = HostApi::new(epoch, tiny_budget);
         // valid_instances_artifact() has 1 row × Vec2 = 8 bytes.
-        assert!(api.publish_artifact(valid_instances_artifact(), epoch).is_ok());
+        assert!(api.publish_artifact("test".into(), valid_instances_artifact(), epoch).is_ok());
         // Second one would push total to 16 > 10.
         assert!(matches!(
-            api.publish_artifact(valid_instances_artifact(), epoch),
+            api.publish_artifact("test2".into(), valid_instances_artifact(), epoch),
             Err(PublishError::BudgetExceeded(
                 ArtifactValidationError::FrameBudgetExceeded { .. }
             ))
@@ -298,8 +310,8 @@ mod tests {
     fn drain_staged_returns_all_valid_artifacts() {
         let epoch = PlanEpoch(1);
         let mut api = HostApi::new(epoch, ArtifactBudget::default());
-        api.publish_artifact(valid_instances_artifact(), epoch).unwrap();
-        api.publish_artifact(RenderArtifact::None, epoch).unwrap();
+        api.publish_artifact("test3".into(), valid_instances_artifact(), epoch).unwrap();
+        api.publish_artifact("test4".into(), RenderArtifact::None, epoch).unwrap();
         let drained = api.drain_staged();
         assert_eq!(drained.len(), 2);
     }

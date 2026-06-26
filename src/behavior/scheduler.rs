@@ -49,42 +49,45 @@ impl Slot {
     }
 }
 
-pub(super) struct BehaviorScheduler {
-    slots: Vec<Slot>,
+pub(crate) struct BehaviorScheduler {
     publisher: SignalPublisher,
-    schema: Schema,
+    schema: Arc<SignalSchema>,
     frame: FrameSource,
     frame_buf: Vec<u8>,
+    slots: Vec<Slot>,
     stats: Arc<BehaviorStatsShared>,
+    artifact_tx: Option<std::sync::mpsc::Sender<(String, crate::runtime::artifact::RenderArtifact)>>,
 
     start: Instant,
     last_update: Instant,
-    published: u64,
     fps_window_start: Instant,
     fps_window_ticks: u32,
+    published: u64,
 }
 
 impl BehaviorScheduler {
-    pub(super) fn new(
+    pub fn new(
         publisher: SignalPublisher,
-        schema: Schema,
+        schema: Arc<SignalSchema>,
         frame: FrameSource,
         initial: Vec<BehaviorInit>,
         stats: Arc<BehaviorStatsShared>,
+        artifact_tx: Option<std::sync::mpsc::Sender<(String, crate::runtime::artifact::RenderArtifact)>>,
     ) -> Self {
-        let now = Instant::now();
-        BehaviorScheduler {
-            slots: initial.into_iter().map(Slot::from_init).collect(),
+        let slots = initial.into_iter().map(Slot::from_init).collect();
+        Self {
             publisher,
             schema,
             frame,
             frame_buf: Vec::new(),
+            slots,
             stats,
-            start: now,
-            last_update: now,
-            published: 0,
-            fps_window_start: now,
+            artifact_tx,
+            start: Instant::now(),
+            last_update: Instant::now(),
+            fps_window_start: Instant::now(),
             fps_window_ticks: 0,
+            published: 0,
         }
     }
 
@@ -164,8 +167,14 @@ impl BehaviorScheduler {
         for slot in slots.iter_mut().filter(|s| s.enabled) {
             let frame = dims.map(|(w, h)| FrameView::new(w, h, frame_buf));
             let config = ResolvedConfig::new(&slot.specs, &slot.values);
-            let mut ctx = BehaviorCtx::new(frame, &mut *publisher, config, timing);
+            let mut ctx = BehaviorCtx::new(slot.instance_id.clone(), frame, &mut *publisher, config, timing);
             slot.node.update(&mut ctx);
+            
+            if let Some(artifact) = ctx.artifact.take() {
+                if let Some(tx) = &self.artifact_tx {
+                    let _ = tx.send((slot.instance_id.clone(), artifact));
+                }
+            }
         }
         let update_time = update_start.elapsed();
 
@@ -391,7 +400,7 @@ mod tests {
         let schema = test_schema();
         let (publisher, reader) = SignalStore::new(&schema);
         let stats = Arc::new(BehaviorStatsShared::default());
-        let sched = BehaviorScheduler::new(publisher, schema, FrameSource::empty(), initial, stats);
+        let sched = BehaviorScheduler::new(publisher, schema, FrameSource::empty(), initial, stats, None);
         (sched, reader)
     }
 

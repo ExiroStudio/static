@@ -32,6 +32,7 @@ pub mod host;
 pub mod host_api;
 pub mod packing;
 pub mod plan;
+pub mod reflection;
 pub mod signals_group;
 pub mod sink;
 pub mod targets;
@@ -322,7 +323,7 @@ impl PipelineRuntime {
                 // declared `consume` signals into `@group(3)` (same as builtins).
                 None => self.build_external(device, entry, &resolved, &signals)?,
             };
-            new_graph.push(instance);
+            new_graph.push(node.instance_id.clone(), instance);
         }
 
         // Phase 2 (D004, I006, I015): advance epoch, compile immutable plan.
@@ -355,38 +356,101 @@ impl PipelineRuntime {
         resolved: &ResolvedConfig,
         signals: &SignalContext,
     ) -> Result<Box<dyn FilterNode>> {
-        let shader = entry
+        use crate::addon::manifest::PipelineRenderer;
+        
+        let renderer = entry
             .manifest
-            .shaders
-            .iter()
-            .find(|s| s.stage == "fragment")
-            .or_else(|| entry.manifest.shaders.first())
-            .ok_or_else(|| AddonError::NoImplementation(entry.manifest.id.clone()))?;
+            .pipeline
+            .as_ref()
+            .map(|p| p.renderer)
+            .unwrap_or(PipelineRenderer::Fullscreen);
 
-        let path = entry.root.join(&shader.path);
-        let src = std::fs::read_to_string(&path).map_err(|e| {
-            AddonError::Package(format!("failed to read shader {:?}: {e}", shader.path))
-        })?;
+        match renderer {
+            PipelineRenderer::Fullscreen => {
+                let shader = entry
+                    .manifest
+                    .shaders
+                    .iter()
+                    .find(|s| s.stage == "fragment")
+                    .or_else(|| entry.manifest.shaders.first())
+                    .ok_or_else(|| AddonError::NoImplementation(entry.manifest.id.clone()))?;
 
-        // Numeric params packed in sorted-key order (BTreeMap iterates sorted),
-        // matching the convention the addon's `@group(2)` struct must follow.
-        let params: Vec<f32> = entry
-            .manifest
-            .params
-            .keys()
-            .map(|k| resolved.f32(k))
-            .collect();
+                let path = entry.root.join(&shader.path);
+                let src = std::fs::read_to_string(&path).map_err(|e| {
+                    AddonError::Package(format!("failed to read shader {:?}: {e}", shader.path))
+                })?;
 
-        Ok(crate::addons::external_shader_node(
-            device,
-            &self.host.layout,
-            &self.image.layout,
-            self.format,
-            &entry.manifest.id,
-            &src,
-            &params,
-            signals,
-        ))
+                // Numeric params packed in sorted-key order (BTreeMap iterates sorted),
+                // matching the convention the addon's `@group(2)` struct must follow.
+                let params: Vec<f32> = entry
+                    .manifest
+                    .params
+                    .keys()
+                    .map(|k| resolved.f32(k))
+                    .collect();
+
+                Ok(crate::addons::external_shader_node(
+                    device,
+                    &self.host.layout,
+                    &self.image.layout,
+                    self.format,
+                    &entry.manifest.id,
+                    &src,
+                    &params,
+                    signals,
+                ))
+            }
+            PipelineRenderer::Instanced => {
+                let shader = entry
+                    .manifest
+                    .shaders
+                    .iter()
+                    .find(|s| s.stage == "fragment")
+                    .or_else(|| entry.manifest.shaders.first())
+                    .ok_or_else(|| AddonError::NoImplementation(entry.manifest.id.clone()))?;
+
+                let path = entry.root.join(&shader.path);
+                let src = std::fs::read_to_string(&path).map_err(|e| {
+                    AddonError::Package(format!("failed to read shader {:?}: {e}", shader.path))
+                })?;
+
+                let params: Vec<f32> = entry
+                    .manifest
+                    .params
+                    .keys()
+                    .map(|k| resolved.f32(k))
+                    .collect();
+
+                let schema = entry.manifest.pipeline.as_ref()
+                    .and_then(|p| p.instance_schema.as_ref())
+                    .ok_or_else(|| AddonError::Package("instanced pipeline requires instance_schema".into()))?;
+
+                use crate::runtime::artifact::SemanticField;
+                use crate::runtime::packing::{LayoutPlan, PackingProfile};
+
+                let semantic_fields: Vec<SemanticField> = schema.fields.iter().map(|f| match f.kind.as_str() {
+                    "vec2" => SemanticField::Position2,
+                    "vec3" => SemanticField::Position3,
+                    "vec4" => SemanticField::ColorRgba,
+                    "float" => SemanticField::CustomFloat(f.name.clone()),
+                    _ => SemanticField::CustomFloat(f.name.clone()),
+                }).collect();
+
+                let layout_plan = LayoutPlan::compile(&semantic_fields, PackingProfile::VertexInstanced);
+
+                Ok(crate::addons::instanced_external_node(
+                    device,
+                    &self.host.layout,
+                    &self.image.layout,
+                    self.format,
+                    &entry.manifest.id,
+                    &src,
+                    &params,
+                    signals,
+                    &layout_plan,
+                ))
+            }
+        }
     }
 
     /// Recreate the ping-pong targets at a new surface size. The instantiated
@@ -416,7 +480,33 @@ impl PipelineRuntime {
         surface_view: &TextureView,
         time: f32,
         signals: &SignalSnapshot,
+        staged_artifacts: Vec<(String, crate::runtime::artifact::RenderArtifact)>,
     ) {
+        if self.current_plan.is_none() {
+            return; // no valid build
+        }
+
+        self.host.upload(queue, self.size, time);
+
+        // Stage artifacts through the HostApi
+        let mut host_api = crate::runtime::HostApi::new(
+            self.current_epoch,
+            crate::runtime::ArtifactBudget::default(),
+        );
+        for (instance_id, artifact) in staged_artifacts {
+            if let Err(e) = host_api.publish_artifact(instance_id, artifact, self.current_epoch) {
+                eprintln!("[runtime] artifact validation failed: {:?}", e);
+            }
+        }
+        
+        let valid_artifacts = host_api.drain_staged();
+        for staged in valid_artifacts {
+            let key = crate::runtime::BrokerKey::new(self.current_epoch, staged.instance_id.clone());
+            if let Err(e) = self.broker.materialize(device, queue, key, &staged.artifact) {
+                eprintln!("[runtime] materialization failed: {:?}", e);
+            }
+        }
+
         // Phase 4 (I020): Prepare Phase begins here. The Broker is the ONLY
         // entity that may call create_buffer or write_buffer for dynamic data.
         // begin_frame() transitions Active → Idle for stale resources so the
@@ -468,6 +558,7 @@ impl PipelineRuntime {
                 host_bg: &self.host.bind_group,
                 input_bg,
                 output: &self.targets[i & 1].view,
+                resources: None,
             };
             gn.node.process(&mut ctx);
         }
