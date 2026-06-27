@@ -101,6 +101,8 @@ pub struct HostApi {
     budget: ArtifactBudget,
     accumulator: FrameAccumulator,
     staged: Vec<StagedArtifact>,
+    time: f32,
+    dt: f32,
 }
 
 impl HostApi {
@@ -117,7 +119,30 @@ impl HostApi {
                 total_rows: 0,
             },
             staged: Vec::new(),
+            time: 0.0,
+            dt: 0.0,
         }
+    }
+
+    /// Read the epoch this HostApi is staging for.
+    pub fn epoch(&self) -> PlanEpoch {
+        self.current_epoch
+    }
+
+    /// Set timing for native addons.
+    pub fn set_timing(&mut self, time: f32, dt: f32) {
+        self.time = time;
+        self.dt = dt;
+    }
+
+    /// Get current frame time.
+    pub fn time(&self) -> f32 {
+        self.time
+    }
+
+    /// Get delta time.
+    pub fn dt(&self) -> f32 {
+        self.dt
     }
 
     /// Publish a `RenderArtifact` for the current frame.

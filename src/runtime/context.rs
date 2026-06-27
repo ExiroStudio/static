@@ -71,6 +71,8 @@ pub struct FrameContext<'a> {
 
 impl<'a> FrameContext<'a> {}
 
+use crate::runtime::HostApi;
+
 /// A live, instantiated filter node. The runtime holds these as
 /// `Box<dyn FilterNode>` and executes them in order, identically — there is
 /// no per-addon branching anywhere in the executor.
@@ -80,6 +82,9 @@ impl<'a> FrameContext<'a> {}
 /// `queue.write_buffer`), then [`process`](FilterNode::process) (to record the
 /// render pass). Nodes that consume no signals keep the default no-op `prepare`.
 pub trait FilterNode {
+    /// Synchronous CPU update phase to generate render artifacts before materialization.
+    fn update(&mut self, _host: &mut HostApi) {}
+
     /// Refresh per-frame GPU state from the latest signals. Default no-op.
     /// This must only *update* existing resources (e.g. `write_buffer`); it
     /// must never recreate bind groups, pipelines, or rebuild the runtime.
