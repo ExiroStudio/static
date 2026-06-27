@@ -196,12 +196,24 @@ fn repo_pipeline_json_loads_and_validates_against_builtins() {
     registry
         .register_builtin(face_tracking_lite::manifest())
         .unwrap();
+
+    // Register glitch-monitor if present
+    if let Some(glitch) = load_addon_manifest("glitch-monitor") {
+        registry.register_builtin(glitch).unwrap();
+    }
     // The shipped pipeline references the external overlay; register it from its
     // package so validation sees it (skip if the example sources are absent).
     if let Some(overlay) = load_addon_manifest("ascii_mask_overlay") {
         registry.register_builtin(overlay).unwrap();
     } else {
         return;
+    }
+    // Register face-tracking addon from addons/ directory if present
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let face_manifest_path = root.parent().unwrap().join("addons").join("face_tracking").join("manifest.toml");
+    if face_manifest_path.exists() {
+        let face_manifest = Manifest::load(&face_manifest_path).unwrap();
+        registry.register_builtin(face_manifest).unwrap();
     }
 
     let issues = config.validate_against(&registry);
@@ -294,7 +306,7 @@ fn behavior_thread_survives_a_reload_and_keeps_publishing() {
 #[test]
 fn installed_addons_scan_and_shipped_pipeline_validates() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let addons = root.join("addons");
+    let addons = root.parent().unwrap().join("addons");
     let pipeline = root.join("pipeline.json");
     if !addons.exists() || !pipeline.exists() {
         return; // a checkout without installed packages still passes
@@ -309,7 +321,7 @@ fn installed_addons_scan_and_shipped_pipeline_validates() {
     registry.scan(&addons).unwrap();
     assert!(registry.contains("ascii-mask-overlay"), "overlay must be installed");
     assert!(
-        registry.contains("face-tracking-lite"),
+        registry.contains("face-tracking"),
         "face tracker package must be installed"
     );
 
@@ -325,7 +337,7 @@ fn installed_addons_scan_and_shipped_pipeline_validates() {
 fn face_schema() -> Arc<SignalSchema> {
     Arc::new(SignalSchema::from_pairs(&[
         ("face.position", SignalKind::Vec2),
-        ("face.rotation", SignalKind::F32),
+        ("face.rotation", SignalKind::Vec3),
         ("face.scale", SignalKind::F32),
     ]))
 }
@@ -427,14 +439,14 @@ fn group3_packing_order_for_face_signals() {
     // Publish synthetic values and confirm each slot reads back its own signal.
     let (mut publisher, mut reader) = SignalStore::new(&schema);
     publisher.set(schema.id("face.position").unwrap(), SignalValue::Vec2([0.3, -0.4]));
-    publisher.set(schema.id("face.rotation").unwrap(), SignalValue::F32(0.5));
+    publisher.set(schema.id("face.rotation").unwrap(), SignalValue::Vec3([0.0, 0.0, 0.5]));
     publisher.set(schema.id("face.scale").unwrap(), SignalValue::F32(0.7));
     publisher.publish();
 
     let mut snap = reader.snapshot();
     reader.snapshot_into(&mut snap);
     assert_eq!(snap.get(ctx.id("face.position").unwrap()).as_vec2(), Some([0.3, -0.4]));
-    assert_eq!(snap.get(ctx.id("face.rotation").unwrap()).as_f32(), Some(0.5));
+    assert_eq!(snap.get(ctx.id("face.rotation").unwrap()).as_vec3(), Some([0.0, 0.0, 0.5]));
     assert_eq!(snap.get(ctx.id("face.scale").unwrap()).as_f32(), Some(0.7));
 }
 

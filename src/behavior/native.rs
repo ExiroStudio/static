@@ -149,16 +149,14 @@ unsafe extern "C" fn cb_timing(host: *mut NativeHost, dt: *mut f32, elapsed: *mu
 
 // ---- NativeBehaviorBridge --------------------------------------------------
 
-type GetApiFn = unsafe extern "C" fn() -> *const BehaviorApi;
+use crate::native::runner::NativeRunner;
+use crate::native::handshake::{BEHAVIOR_FAMILY, BEHAVIOR_ABI_V1};
 
 pub struct NativeBehaviorBridge {
     entry_path: PathBuf,
-    lib: Option<libloading::Library>,
-    api: *const BehaviorApi,
-    instance: *mut c_void,
+    runner: NativeRunner,
     host: Box<NativeHost>,
     signal_ids: Vec<(String, Option<SignalId>)>,
-    faulted: bool,
     values: ParamMap,
 }
 
@@ -181,12 +179,9 @@ impl NativeBehaviorBridge {
 
         Self {
             entry_path,
-            lib: None,
-            api: std::ptr::null(),
-            instance: std::ptr::null_mut(),
+            runner: NativeRunner::new(),
             host,
             signal_ids: Vec::new(),
-            faulted: false,
             values,
         }
     }
@@ -200,50 +195,24 @@ impl BehaviorNode for NativeBehaviorBridge {
             self.signal_ids.push((name.to_string(), Some(id)));
         }
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            unsafe {
-                let lib = libloading::Library::new(&self.entry_path)
-                    .map_err(|e| format!("dlopen {:?}: {e}", self.entry_path))?;
-                let get_api: libloading::Symbol<GetApiFn> = lib
-                    .get(b"behavior_api")
-                    .map_err(|e| format!("symbol behavior_api: {e}"))?;
-                
-                let api = get_api();
-                if api.is_null() {
-                    return Err("behavior_api returned null".to_string());
+        let host_ptr = self.host.as_mut() as *mut NativeHost as *mut std::ffi::c_void;
+
+        match self.runner.load(&self.entry_path, BEHAVIOR_FAMILY, BEHAVIOR_ABI_V1) {
+            Ok(()) => {
+                if let Err(e) = self.runner.start(host_ptr) {
+                    eprintln!("[engine] [native] start failed: {e}");
+                } else {
+                    eprintln!("[engine] [native] loaded {:?} successfully", self.entry_path);
                 }
-
-                let create = (*api).create;
-                let host_ptr: *mut NativeHost = self.host.as_mut();
-                let instance = create(host_ptr);
-                if instance.is_null() {
-                    return Err("create returned null".to_string());
-                }
-
-                Ok((lib, api, instance))
             }
-        }));
-
-        match result {
-            Ok(Ok((lib, api, instance))) => {
-                self.lib = Some(lib);
-                self.api = api;
-                self.instance = instance;
-                eprintln!("[engine] [native] loaded {:?} successfully", self.entry_path);
-            }
-            Ok(Err(e)) => {
-                eprintln!("[engine] [native] failed to load {:?}: {}", self.entry_path, e);
-                self.faulted = true;
-            }
-            Err(_) => {
-                eprintln!("[engine] [native] panic while loading {:?}", self.entry_path);
-                self.faulted = true;
+            Err(e) => {
+                eprintln!("[engine] [native] failed to load {:?}: {e}", self.entry_path);
             }
         }
     }
 
     fn update(&mut self, ctx: &mut BehaviorCtx) {
-        if self.faulted || self.instance.is_null() || self.api.is_null() {
+        if self.runner.is_faulted() {
             return;
         }
 
@@ -272,23 +241,14 @@ impl BehaviorNode for NativeBehaviorBridge {
         // Wire the current tick's data into the host struct.
         self.host.engine_ctx = &mut cb_state as *mut CallbackState as *mut c_void;
 
-        let update_fn = unsafe { (*self.api).update };
-        let instance = self.instance;
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            unsafe { update_fn(instance) };
-        }));
+        let result = self.runner.update();
 
         // Invalidate pointer.
         self.host.engine_ctx = std::ptr::null_mut();
 
-        match result {
-            Ok(()) => {}
-            Err(_) => {
-                eprintln!("[engine] [native] addon panicked during update — disabling");
-                self.faulted = true;
-                return;
-            }
+        if let Err(e) = result {
+            eprintln!("[engine] [native] addon update failed: {e} — disabling");
+            return;
         }
 
         eprintln!("[native] draining {} staged signals", cb_state.staged.len());
@@ -305,16 +265,7 @@ impl BehaviorNode for NativeBehaviorBridge {
     }
 
     fn stop(&mut self) {
-        if !self.instance.is_null() && !self.api.is_null() {
-            let destroy_fn = unsafe { (*self.api).destroy };
-            let instance = self.instance;
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                unsafe { destroy_fn(instance) };
-            }));
-            self.instance = std::ptr::null_mut();
-        }
-        self.api = std::ptr::null();
-        self.lib = None;
+        self.runner.unload();
         eprintln!("[engine] [native] unloaded {:?}", self.entry_path);
     }
 }

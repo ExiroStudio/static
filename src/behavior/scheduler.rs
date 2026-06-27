@@ -339,7 +339,7 @@ mod tests {
         fn update(&mut self, ctx: &mut BehaviorCtx) {
             self.updates.fetch_add(1, Ordering::Relaxed);
             if self.slow {
-                thread::sleep(Duration::from_millis(10));
+                thread::sleep(Duration::from_millis(25));
             }
             if let Some(id) = self.time_id {
                 let v = ctx.config().f32("v");
@@ -564,13 +564,13 @@ mod tests {
 
     #[test]
     fn over_budget_update_is_counted() {
-        let (init, _h) = probe_init("slow", 1.0, true); // sleeps 10ms > 8ms budget
+        let (init, _h) = probe_init("slow", 1.0, true); // sleeps 25ms > 20ms budget
         let (mut sched, _r) = make(vec![init]);
         sched.start_all();
         sched.tick();
         assert!(
             sched.stats.snapshot().over_budget >= 1,
-            "an update exceeding the 8ms budget must be counted"
+            "an update exceeding the 20ms budget must be counted"
         );
     }
 
