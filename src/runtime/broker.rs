@@ -75,17 +75,17 @@ const ALLOC_GRANULARITY: u64 = 4096;
 /// `schema_id` is **intentionally excluded** from the key so that schema
 /// upgrades on the same node trigger an in-place resize/repack rather than a
 /// full eviction + reallocation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BrokerKey {
     pub plan_epoch: u64,
-    pub node_slot: u32,
+    pub instance_id: String,
 }
 
 impl BrokerKey {
-    pub fn new(epoch: PlanEpoch, slot: usize) -> Self {
+    pub fn new(epoch: PlanEpoch, instance_id: String) -> Self {
         Self {
             plan_epoch: epoch.raw(),
-            node_slot: slot as u32,
+            instance_id,
         }
     }
 }
@@ -292,7 +292,7 @@ impl ResourceBroker {
         // ── Step 2: Packer — LayoutPlan (I013: compile once, replay forever) ──
         let layout = self.get_or_compile_layout(schema);
 
-        if layout.stride == 0 {
+        if layout.stride() == 0 {
             return Err(MaterializeError::ZeroStride);
         }
 
@@ -306,7 +306,7 @@ impl ResourceBroker {
         }
 
         // ── Step 3: Allocator — ensure_buffer() ───────────────────────────
-        self.ensure_buffer(device, key, required_bytes, schema.schema_id, &layout)?;
+        self.ensure_buffer(device, key.clone(), required_bytes, schema.schema_id, &layout)?;
 
         // ── Step 4: Uploader ───────────────────────────────────────────────
         {
@@ -315,7 +315,7 @@ impl ResourceBroker {
             pack_rows(&mut staging, &rows.rows, &layout);
 
             // Upload to GPU.
-            self.upload(queue, key, &staging);
+            self.upload(queue, key.clone(), &staging);
         }
 
         // Mark as Active so sweep() doesn't evict it.
@@ -328,7 +328,7 @@ impl ResourceBroker {
         Ok(MaterializedHandle {
             key,
             row_count,
-            stride: layout.stride,
+            stride: layout.stride(),
         })
     }
 
@@ -345,7 +345,7 @@ impl ResourceBroker {
             if res.state == ResourceState::Idle {
                 if now.duration_since(res.last_used) >= GRACE_WINDOW {
                     res.state = ResourceState::Evicted;
-                    to_evict.push(*key);
+                    to_evict.push(key.clone());
                 }
             }
         }
@@ -549,9 +549,9 @@ mod tests {
         use std::collections::HashSet;
         let mut set = HashSet::new();
         let epoch = PlanEpoch(1);
-        set.insert(BrokerKey::new(epoch, 0));
-        set.insert(BrokerKey::new(epoch, 1));
-        set.insert(BrokerKey::new(epoch, 0)); // duplicate
+        set.insert(BrokerKey::new(epoch, "0".into()));
+        set.insert(BrokerKey::new(epoch, "1".into()));
+        set.insert(BrokerKey::new(epoch, "0".into())); // duplicate
         assert_eq!(set.len(), 2, "BrokerKey hashing must deduplicate");
     }
 
@@ -593,8 +593,8 @@ mod tests {
 
     #[test]
     fn broker_key_different_epochs_are_different() {
-        let k1 = BrokerKey::new(PlanEpoch(1), 0);
-        let k2 = BrokerKey::new(PlanEpoch(2), 0);
+        let k1 = BrokerKey::new(PlanEpoch(1), "0".into());
+        let k2 = BrokerKey::new(PlanEpoch(2), "0".into());
         assert_ne!(k1, k2, "different epochs must produce different keys");
     }
 

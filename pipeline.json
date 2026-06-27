@@ -23,7 +23,9 @@
       "instance_id": "S5Vs7m51TU",
       "addon": "dot-renderer",
       "enabled": true,
-      "config": {}
+      "config": {
+        "contrast": 0.8
+      }
     },
     {
       "instance_id": "WOCHk-hNIj",

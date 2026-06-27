@@ -47,6 +47,10 @@ impl<'a> SignalContext<'a> {
         self.consume
     }
 }
+pub(crate) struct MaterializedResources<'a> {
+    pub(crate) instance_buffer: Option<&'a wgpu::Buffer>,
+    pub(crate) row_count: u32,
+}
 
 /// Everything a node needs to record one frame's worth of work.
 ///
@@ -61,7 +65,13 @@ pub struct FrameContext<'a> {
     pub input_bg: &'a BindGroup,
     /// The texture view this node must render its result into.
     pub output: &'a TextureView,
+    /// Opaque access to resources materialized by the Broker for this node.
+    pub(crate) resources: Option<MaterializedResources<'a>>,
 }
+
+impl<'a> FrameContext<'a> {}
+
+use crate::runtime::HostApi;
 
 /// A live, instantiated filter node. The runtime holds these as
 /// `Box<dyn FilterNode>` and executes them in order, identically — there is
@@ -72,6 +82,9 @@ pub struct FrameContext<'a> {
 /// `queue.write_buffer`), then [`process`](FilterNode::process) (to record the
 /// render pass). Nodes that consume no signals keep the default no-op `prepare`.
 pub trait FilterNode {
+    /// Synchronous CPU update phase to generate render artifacts before materialization.
+    fn update(&mut self, _host: &mut HostApi) {}
+
     /// Refresh per-frame GPU state from the latest signals. Default no-op.
     /// This must only *update* existing resources (e.g. `write_buffer`); it
     /// must never recreate bind groups, pipelines, or rebuild the runtime.

@@ -79,6 +79,8 @@ pub struct Engine {
     signals: SignalSnapshot,
     /// Control handle for the behavior thread. Dropping it stops + joins.
     behavior: BehaviorHandle,
+    /// Channel receiver for rendered artifacts published by behaviors.
+    artifact_rx: std::sync::mpsc::Receiver<(String, crate::runtime::artifact::RenderArtifact)>,
     /// Wall time of the last structural rebuild (diagnostics).
     last_reload_ms: f32,
     /// Total `@group(3)` uniform bytes across the live filters (diagnostics).
@@ -204,7 +206,8 @@ impl Engine {
         let (publisher, reader) = SignalStore::new(&schema);
         let signals = reader.snapshot();
         let group3_bytes = group3_bytes(&config, runtime.registry());
-        let behavior = BehaviorRuntime::spawn(publisher, schema.clone(), frame, inits);
+        let (artifact_tx, artifact_rx) = std::sync::mpsc::channel();
+        let behavior = BehaviorRuntime::spawn(publisher, schema.clone(), frame, inits, Some(artifact_tx));
 
         Self {
             gpu,
@@ -217,6 +220,7 @@ impl Engine {
             reader,
             signals,
             behavior,
+            artifact_rx,
             last_reload_ms: 0.0,
             group3_bytes,
             frame_buf: Vec::new(),
@@ -532,6 +536,7 @@ impl Engine {
         // One immutable, consistent snapshot per frame; every node reads from it.
         self.reader.snapshot_into(&mut self.signals);
 
+        let staged_artifacts: Vec<_> = self.artifact_rx.try_iter().collect();
         let time = self.start.elapsed().as_secs_f32();
         self.runtime.render(
             &self.gpu.device,
@@ -539,6 +544,7 @@ impl Engine {
             &view,
             time,
             &self.signals,
+            staged_artifacts,
         ); // encoder #1 (submits)
 
         self.log_stats();

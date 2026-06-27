@@ -70,6 +70,7 @@ pub fn manifest() -> Manifest {
         params: BTreeMap::new(),
         publish: published(),
         consume: vec![],
+        pipeline: None,
     }
 }
 

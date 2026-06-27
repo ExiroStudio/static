@@ -49,9 +49,12 @@ These rules are non-negotiable.
 *   ❌ Addons must never directly access `Queue`.
 *   ❌ Addons must never directly access `Device`.
 *   ❌ Addons must never create `BindGroup`s.
-*   ❌ Addons must never create `RenderPipeline`s.
+*   ❌ `ExecutionUnit` must never create `RenderPipeline`s.
 *   ❌ Materialization must never happen inside addons.
 *   ❌ Global render state is forbidden.
+*   ❌ `BehaviorCtx::publish_artifact()` must never be called more than once per frame (last publish wins, or emits a warning).
+*   ❌ `PipelineRenderer` variants must describe *how* to draw (e.g. `Fullscreen`, `Instanced`, `Indirect`), never the workload feature (e.g. `MSDF`, `Particle`).
+*   ❌ InstanceSchema field ordering is ABI. Changing field order changes schema identity. Schema identity must be regenerated whenever field layout changes.
 
 ## 4. Required Rules
 
@@ -59,7 +62,7 @@ What every subsystem MUST do:
 
 *   **ExecutionUnit:**
     *   ✔ Compute semantics.
-    *   ✔ Publish `RenderArtifact`.
+    *   ✔ Publish `RenderArtifact` (Ownership is transferred; the artifact becomes immutable upon publish).
 *   **Broker:**
     *   ✔ Translate semantics into physical buffers.
     *   ✔ Allocate GPU memory via `Allocator`.
@@ -82,6 +85,7 @@ What every subsystem MUST do:
 *   **I012:** Semantic artifacts are ephemeral. They belong to exactly one FrameEpoch.
 *   **I016:** Physical resources are persistent. Resource ownership survives hot reload.
 *   **I020:** Execution never talks to the GPU for allocations. Execution Phase must never allocate GPU resources. Allocation strictly belongs to the Prepare Phase.
+*   **I021:** LayoutPlan is immutable. After `LayoutPlan::compile()` succeeds, no subsystem may modify stride, offsets, field ordering, or alignment. A schema change MUST produce a new LayoutPlan by recompilation. Mutation of an existing LayoutPlan is strictly forbidden.
 
 ## 6. Decision Principles
 

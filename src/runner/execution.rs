@@ -130,7 +130,7 @@ impl ExecutionUnit for BehaviorExecutionUnit {
 
         {
             let config = ResolvedConfig::new(specs, values);
-            let mut ctx = BehaviorCtx::new(None, publisher, config, timing);
+            let mut ctx = BehaviorCtx::new("mock_instance".into(), None, publisher, config, timing);
             node.update(&mut ctx); // the proof: real BehaviorNode.update() runs
         }
         publisher.publish();

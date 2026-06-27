@@ -269,6 +269,130 @@ pub fn external_shader_node(
     })
 }
 
+// ---- instanced external node -----------------------------------------------
+
+struct ExternalInstancedNode {
+    pipeline: RenderPipeline,
+    params_bg: BindGroup,
+    signals: Option<SignalsBinding>,
+}
+
+impl FilterNode for ExternalInstancedNode {
+    fn prepare(&mut self, queue: &Queue, signals: &SignalSnapshot) {
+        if let Some(bg) = self.signals.as_mut() {
+            bg.update(queue, signals);
+        }
+    }
+
+    fn process(&self, ctx: &mut FrameContext) {
+        let mut pass = ctx.encoder.begin_render_pass(&RenderPassDescriptor {
+            label: Some("ExternalInstancedNode pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: ctx.output,
+                resolve_target: None,
+                ops: Operations {
+                    load: LoadOp::Load,
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, ctx.host_bg, &[]);
+        pass.set_bind_group(1, ctx.input_bg, &[]);
+        pass.set_bind_group(2, &self.params_bg, &[]);
+        if let Some(bg) = self.signals.as_ref().map(SignalsBinding::bind_group) {
+            pass.set_bind_group(3, bg, &[]);
+        }
+
+        if let Some(res) = &ctx.resources {
+            if let Some(buf) = res.instance_buffer {
+                pass.set_vertex_buffer(0, buf.slice(..));
+            }
+            if res.row_count > 0 {
+                pass.draw(0..6, 0..res.row_count);
+            }
+        }
+    }
+}
+
+pub fn instanced_external_node(
+    device: &Device,
+    host_layout: &BindGroupLayout,
+    image_layout: &BindGroupLayout,
+    format: TextureFormat,
+    label: &str,
+    shader_src: &str,
+    params: &[f32],
+    signals: &SignalContext,
+    layout_plan: &crate::runtime::packing::LayoutPlan,
+) -> Box<dyn FilterNode> {
+    let mut floats = params.to_vec();
+    while floats.is_empty() || floats.len() % 4 != 0 {
+        floats.push(0.0);
+    }
+
+    let slayout = signals_layout(device);
+    let binding = SignalsBinding::new(device, &slayout, signals);
+    let extra: &[&BindGroupLayout] = if binding.is_some() { &[&slayout] } else { &[] };
+
+    let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents: bytemuck::cast_slice(&floats),
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+    });
+    let plyt = params_layout(device, label);
+    let params_bg = params_bind_group(device, &plyt, &params_buf);
+
+    let mut layouts: Vec<&BindGroupLayout> = vec![host_layout, image_layout, &plyt];
+    layouts.extend_from_slice(extra);
+
+    let module = crate::effects::make_module(device, label, shader_src);
+
+    let packer = crate::runtime::reflection::VertexPacker::new(layout_plan);
+    let vertex_layout = packer.layout();
+
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: &layouts,
+        push_constant_ranges: &[],
+    });
+
+    let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(&pipeline_layout),
+        vertex: VertexState {
+            module: &module,
+            entry_point: "vs_main",
+            buffers: &[vertex_layout],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(FragmentState {
+            module: &module,
+            entry_point: "fs_main",
+            targets: &[Some(ColorTargetState {
+                format,
+                blend: Some(BlendState::REPLACE),
+                write_mask: ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        multiview: None,
+    });
+
+    Box::new(ExternalInstancedNode {
+        pipeline,
+        params_bg,
+        signals: binding,
+    })
+}
+
 // ---- manifest construction helpers --------------------------------------
 
 /// Base manifest shared by all builtin addons (api 1..=1, pipeline kind).
@@ -294,6 +418,7 @@ fn base_manifest(id: &str, name: &str, description: &str) -> Manifest {
         params: BTreeMap::new(),
         publish: vec![],
         consume: vec![],
+        pipeline: None,
     }
 }
 

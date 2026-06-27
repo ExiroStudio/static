@@ -227,6 +227,7 @@ pub fn manifest() -> Manifest {
         params: params(),
         publish: published(),
         consume: vec![],
+        pipeline: None,
     }
 }
 

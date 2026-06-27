@@ -13,6 +13,7 @@ mod behavior;
 mod camera;
 mod effects;
 mod engine;
+pub mod native;
 mod runner;
 mod runtime;
 mod signal;
