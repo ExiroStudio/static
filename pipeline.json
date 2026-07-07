@@ -7,42 +7,10 @@
   },
   "pipeline": [
     {
-      "instance_id": "niBPRmkO35",
-      "addon": "ascii-mask-overlay",
-      "enabled": true,
-      "config": {
-        "mask_size": 0.05000000074505806,
-        "mirror_x": false,
-        "offset_x": 0.0,
-        "offset_y": -0.06,
-        "opacity": 1.0,
-        "scale_mul": 2.0
-      }
-    },
-    {
-      "instance_id": "S5Vs7m51TU",
-      "addon": "dot-renderer",
-      "enabled": true,
-      "config": {
-        "contrast": 0.8
-      }
-    },
-    {
-      "instance_id": "WOCHk-hNIj",
-      "addon": "crt",
-      "enabled": true,
-      "config": {}
-    },
-    {
-      "instance_id": "gNptGRaWrr",
+      "instance_id": "iZDCv4-d4R",
       "addon": "glitch-monitor",
       "enabled": true,
-      "config": {
-        "block_size": 16.0,
-        "displacement": 0.04,
-        "frequency": 0.06,
-        "intensity": 0.0
-      }
+      "config": {}
     }
   ],
   "behaviors": [
