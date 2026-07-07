@@ -44,7 +44,7 @@ impl ApplicationHandler for App {
                 .create_window(
                     Window::default_attributes()
                         .with_title("Static")
-                        .with_inner_size(LogicalSize::new(800.0, 600.0)),
+                        .with_inner_size(LogicalSize::new(1280.0, 720.0)),
                 )
                 .expect("failed to create window"),
         );
