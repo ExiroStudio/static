@@ -80,7 +80,7 @@ pub struct Engine {
     /// Control handle for the behavior thread. Dropping it stops + joins.
     behavior: BehaviorHandle,
     /// Channel receiver for rendered artifacts published by behaviors.
-    artifact_rx: std::sync::mpsc::Receiver<(String, crate::runtime::artifact::RenderArtifact)>,
+    artifact_rx: std::sync::mpsc::Receiver<(crate::runtime::NodeHandle, crate::runtime::ArtifactHandle, crate::runtime::artifact::RenderArtifact)>,
     /// Wall time of the last structural rebuild (diagnostics).
     last_reload_ms: f32,
     /// Total `@group(3)` uniform bytes across the live filters (diagnostics).
@@ -102,6 +102,7 @@ pub struct Engine {
     cur_signal_hz: f32,
     /// Pending debounced config save for hot (non-rebuild) behavior edits.
     save_at: Option<Instant>,
+    total_frames: u64,
 
     /// The GPU context. Moved to the bottom of the struct to ensure it is the
     /// LAST field dropped during unwinding/destruction, avoiding Surface
@@ -186,6 +187,7 @@ impl Engine {
         // create their BehaviorInits directly.
         let native_inits = create_native_inits(runtime.registry(), &config);
         inits.extend(native_inits);
+        compile_behavior_handles(&mut inits, &config);
 
         let (schema, warnings) = build_schema(&inits, &config, runtime.registry())
             .expect("initial pipeline schema is invalid");
@@ -233,6 +235,7 @@ impl Engine {
             cur_fps: 0.0,
             cur_signal_hz: 0.0,
             save_at: None,
+            total_frames: 0,
         }
     }
 
@@ -410,6 +413,7 @@ impl Engine {
         // Append native behavior inits.
         let native_inits = create_native_inits(self.runtime.registry(), &self.config);
         inits.extend(native_inits);
+        compile_behavior_handles(&mut inits, &self.config);
 
         let (schema, warnings) = build_schema(&inits, &self.config, self.runtime.registry())
             .map_err(|e| e.to_string())?;
@@ -516,20 +520,39 @@ impl Engine {
         camera: &WebcamCapture,
         overlay: impl FnOnce(&Device, &Queue, &TextureView, [u32; 2]),
     ) {
+        let frame_start = Instant::now();
+        self.total_frames += 1;
+        crate::runtime::CURRENT_FRAME.store(self.total_frames, std::sync::atomic::Ordering::SeqCst);
+
+        crate::trace_log!("ENGINE", "FRAME BEGIN");
+        crate::trace_log!("ENGINE", "  frame_id: {}", self.total_frames);
+        crate::trace_log!("ENGINE", "  epoch: {}", self.runtime.current_epoch().raw());
+        crate::trace_log!("ENGINE", "  compiled_plan_id: {}", self.runtime.current_plan_hash().unwrap_or(0));
+        crate::trace_log!("ENGINE", "  surface_size: {}x{}", self.gpu.config.width, self.gpu.config.height);
+        crate::trace_log!("ENGINE", "  camera_size: {}x{}", self.video.width, self.video.height);
+        crate::trace_log!("ENGINE", "  backbuffer_size: {}x{}", self.gpu.config.width, self.gpu.config.height);
+
+        crate::trace_log!("ENGINE", "Camera Upload Begin");
+
         // Stream the newest webcam frame to the GPU (the source).
         if camera.copy_latest(&mut self.frame_buf) && !self.frame_buf.is_empty() {
             self.video.upload(&self.gpu.queue, &self.frame_buf);
         }
+        crate::trace_log!("ENGINE", "Camera Upload End");
 
         let frame = match self.gpu.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(SurfaceError::Lost | SurfaceError::Outdated) => {
+                crate::trace_log!("WARNING", "Surface lost or outdated; reconfiguring surface");
                 self.gpu
                     .surface
                     .configure(&self.gpu.device, &self.gpu.config);
                 return; // overlay skipped this frame too; next frame re-runs the UI
             }
-            Err(_) => return,
+            Err(e) => {
+                crate::trace_log!("WARNING", "Failed to get current surface texture: {:?}", e);
+                return;
+            }
         };
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
 
@@ -537,6 +560,21 @@ impl Engine {
         self.reader.snapshot_into(&mut self.signals);
 
         let staged_artifacts: Vec<_> = self.artifact_rx.try_iter().collect();
+        let staged_artifacts_count = staged_artifacts.len();
+        for (node_h, art_h, art) in &staged_artifacts {
+            let size = art.estimated_bytes();
+            let payload_type = match art {
+                crate::runtime::artifact::RenderArtifact::Instances { .. } => "Instances",
+                crate::runtime::artifact::RenderArtifact::None => "None",
+                _ => "Unknown",
+            };
+            crate::trace_log!("CHANNEL", "CHANNEL RECEIVE");
+            crate::trace_log!("CHANNEL", "  node_handle: NodeHandle({})", node_h.raw());
+            crate::trace_log!("CHANNEL", "  artifact_handle: ArtifactHandle({})", art_h.raw());
+            crate::trace_log!("CHANNEL", "  payload: {}", payload_type);
+            crate::trace_log!("CHANNEL", "  length: {} bytes", size);
+        }
+
         let time = self.start.elapsed().as_secs_f32();
         self.runtime.render(
             &self.gpu.device,
@@ -557,6 +595,15 @@ impl Engine {
         ); // encoder #2 (egui), same surface frame
 
         frame.present();
+
+        let duration = frame_start.elapsed();
+        crate::trace_log!("ENGINE", "FRAME END");
+        crate::trace_log!("ENGINE", "  frame duration: {:?}", duration);
+        crate::trace_log!("ENGINE", "  node count: {}", self.runtime.graph_len());
+        crate::trace_log!("ENGINE", "  artifact count: {}", staged_artifacts_count);
+        crate::trace_log!("ENGINE", "  GPU upload count: {}", self.runtime.broker().frame_metrics().upload_count);
+        crate::trace_log!("ENGINE", "  GPU bytes uploaded: {} bytes", self.runtime.broker().frame_metrics().bytes_uploaded);
+        crate::trace_log!("ENGINE", "  present success: true");
     }
 
     /// Spike instrumentation: once per second, report FPS, rebuild count, signal
@@ -755,4 +802,16 @@ fn create_native_inits(
         ));
     }
     inits
+}
+
+fn compile_behavior_handles(inits: &mut [crate::behavior::BehaviorInit], config: &crate::addon::pipeline::PipelineConfig) {
+    let mut next_handle = config.pipeline.len() as u32;
+    for init in inits.iter_mut() {
+        if let Some(render_index) = config.pipeline.iter().position(|node| node.instance_id == init.instance_id) {
+            init.node_handle = crate::runtime::NodeHandle::new(render_index as u32);
+        } else {
+            init.node_handle = crate::runtime::NodeHandle::new(next_handle);
+            next_handle += 1;
+        }
+    }
 }

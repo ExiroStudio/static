@@ -58,6 +58,7 @@ impl NativeRunner {
                 .map_err(|e| RunnerError::Symbol(format!("missing get_handshake: {e}")))?;
 
             let handshake = get_handshake();
+            println!("[NATIVE] Addon handshake: family = 0x{:08X}, handshake_abi = {}, runtime_abi = 0x{:08X}", handshake.runtime_family, handshake.handshake_abi, handshake.runtime_abi);
             if handshake.handshake_abi != super::handshake::HANDSHAKE_ABI_VERSION {
                 return Err(RunnerError::Handshake(format!(
                     "handshake ABI mismatch: expected {}, got {}",
@@ -99,6 +100,7 @@ impl NativeRunner {
 
         match result {
             Ok(Ok((lib, create, update, destroy))) => {
+                println!("[NATIVE] Native addon loaded successfully from {:?}", path);
                 self.lib = Some(lib);
                 self.create_fn = Some(create);
                 self.update_fn = Some(update);
@@ -106,10 +108,12 @@ impl NativeRunner {
                 Ok(())
             }
             Ok(Err(e)) => {
+                println!("[WARNING] Native addon load failed: {:?}", e);
                 self.faulted = true;
                 Err(e)
             }
             Err(_) => {
+                println!("[ERROR] Panic during library load of {:?}", path);
                 self.faulted = true;
                 Err(RunnerError::Load("panic during library load".into()))
             }
@@ -128,6 +132,7 @@ impl NativeRunner {
 
         match result {
             Ok(instance) => {
+                println!("[NATIVE] Addon instance created: host_ptr = {:p}, instance_ptr = {:p}", host_ptr, instance);
                 if instance.is_null() {
                     self.faulted = true;
                     Err("create_instance returned null".into())

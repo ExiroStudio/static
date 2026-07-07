@@ -78,6 +78,7 @@ pub fn manifest() -> Manifest {
 /// values. The engine seeds and reloads the runtime with these.
 pub fn init_with(instance_id: String, values: ParamMap, enabled: bool) -> BehaviorInit {
     BehaviorInit {
+        node_handle: crate::runtime::NodeHandle::new(0),
         instance_id,
         node: Box::new(TimeBehavior::default()),
         publish: published(),

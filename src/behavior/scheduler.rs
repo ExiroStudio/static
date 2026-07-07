@@ -28,6 +28,7 @@ const UPDATE_BUDGET: Duration = Duration::from_millis(20);
 /// One live behavior plus its owned, mutable config (so `SetParam` is a hot
 /// update that never recreates the instance).
 struct Slot {
+    node_handle: crate::runtime::NodeHandle,
     instance_id: String,
     node: Box<dyn super::node::BehaviorNode>,
     specs: BTreeMap<String, ParamSpec>,
@@ -39,6 +40,7 @@ struct Slot {
 impl Slot {
     fn from_init(init: BehaviorInit) -> Self {
         Slot {
+            node_handle: init.node_handle,
             instance_id: init.instance_id,
             node: init.node,
             specs: init.specs,
@@ -56,7 +58,7 @@ pub(crate) struct BehaviorScheduler {
     frame_buf: Vec<u8>,
     slots: Vec<Slot>,
     stats: Arc<BehaviorStatsShared>,
-    artifact_tx: Option<std::sync::mpsc::Sender<(String, crate::runtime::artifact::RenderArtifact)>>,
+    artifact_tx: Option<std::sync::mpsc::Sender<(crate::runtime::NodeHandle, crate::runtime::ArtifactHandle, crate::runtime::artifact::RenderArtifact)>>,
 
     start: Instant,
     last_update: Instant,
@@ -72,7 +74,7 @@ impl BehaviorScheduler {
         frame: FrameSource,
         initial: Vec<BehaviorInit>,
         stats: Arc<BehaviorStatsShared>,
-        artifact_tx: Option<std::sync::mpsc::Sender<(String, crate::runtime::artifact::RenderArtifact)>>,
+        artifact_tx: Option<std::sync::mpsc::Sender<(crate::runtime::NodeHandle, crate::runtime::ArtifactHandle, crate::runtime::artifact::RenderArtifact)>>,
     ) -> Self {
         let slots = initial.into_iter().map(Slot::from_init).collect();
         Self {
@@ -157,6 +159,8 @@ impl BehaviorScheduler {
         let elapsed = self.start.elapsed().as_secs_f32();
         let timing = Timing { dt, elapsed };
 
+        println!("[BEHAVIOR] Scheduler tick: timing = Timing {{ dt: {}, elapsed: {} }}, published frames count = {}", dt, elapsed, self.published);
+
         // Split borrows so the per-behavior loop can touch slots, the publisher,
         // and the frame buffer at once.
         let publisher = &mut self.publisher;
@@ -167,12 +171,34 @@ impl BehaviorScheduler {
         for slot in slots.iter_mut().filter(|s| s.enabled) {
             let frame = dims.map(|(w, h)| FrameView::new(w, h, frame_buf));
             let config = ResolvedConfig::new(&slot.specs, &slot.values);
-            let mut ctx = BehaviorCtx::new(slot.instance_id.clone(), frame, &mut *publisher, config, timing);
-            slot.node.update(&mut ctx);
+            let mut ctx = BehaviorCtx::new(slot.node_handle, frame, &mut *publisher, config, timing);
             
-            if let Some(artifact) = ctx.artifact.take() {
+            let node_start = Instant::now();
+            println!("[BEHAVIOR] Running behavior node update for NodeHandle({})", slot.node_handle.raw());
+            slot.node.update(&mut ctx);
+            let node_elapsed = node_start.elapsed();
+            println!("[BEHAVIOR] Behavior node update completed for NodeHandle({}). Duration: {:?}", slot.node_handle.raw(), node_elapsed);
+            
+            if let Some((art_handle, artifact)) = ctx.artifact.take() {
+                println!("[BEHAVIOR] NodeHandle({}) published ArtifactHandle({}) inside context", slot.node_handle.raw(), art_handle.raw());
                 if let Some(tx) = &self.artifact_tx {
-                    let _ = tx.send((slot.instance_id.clone(), artifact));
+                    let size = artifact.estimated_bytes();
+                    let payload_type = match &artifact {
+                        crate::runtime::artifact::RenderArtifact::Instances { .. } => "Instances",
+                        crate::runtime::artifact::RenderArtifact::None => "None",
+                        _ => "Unknown",
+                    };
+                    crate::trace_log!("CHANNEL", "CHANNEL SEND");
+                    crate::trace_log!("CHANNEL", "  node_handle: NodeHandle({})", slot.node_handle.raw());
+                    crate::trace_log!("CHANNEL", "  artifact_handle: ArtifactHandle({})", art_handle.raw());
+                    crate::trace_log!("CHANNEL", "  payload: {}", payload_type);
+                    crate::trace_log!("CHANNEL", "  length: {} bytes", size);
+
+                    if let Err(e) = tx.send((slot.node_handle, art_handle, artifact)) {
+                        crate::trace_log!("WARNING", "Failed to send artifact over scheduler channel: {:?}", e);
+                    }
+                } else {
+                    crate::trace_log!("WARNING", "self.artifact_tx is None; cannot send artifact");
                 }
             }
         }
@@ -184,6 +210,11 @@ impl BehaviorScheduler {
 
         let over_budget = update_time > UPDATE_BUDGET;
         if over_budget {
+            println!(
+                "[WARNING] [BEHAVIOR] Update budget exceeded: {:.2}ms > {}ms",
+                update_time.as_secs_f32() * 1000.0,
+                UPDATE_BUDGET.as_millis(),
+            );
             #[cfg(debug_assertions)]
             eprintln!(
                 "[behavior] update budget exceeded: {:.2}ms > {}ms",
@@ -382,6 +413,7 @@ mod tests {
         let mut values = ParamMap::new();
         values.insert("v".to_string(), ParamValue::F32(default_v as f64));
         let init = BehaviorInit {
+            node_handle: crate::runtime::NodeHandle::new(0),
             instance_id: id.to_string(),
             node: Box::new(node),
             publish: vec![],

@@ -235,6 +235,7 @@ pub fn manifest() -> Manifest {
 /// instance from an id + per-instance config. Registered under the manifest id.
 pub fn init_with(instance_id: String, values: ParamMap, enabled: bool) -> BehaviorInit {
     BehaviorInit {
+        node_handle: crate::runtime::NodeHandle::new(0),
         instance_id,
         node: Box::new(FaceTrackingLite::default()),
         publish: published(),

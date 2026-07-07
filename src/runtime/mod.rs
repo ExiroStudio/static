@@ -30,6 +30,7 @@ pub mod context;
 pub mod graph;
 pub mod host;
 pub mod host_api;
+pub mod identity;
 pub mod native;
 pub mod packing;
 pub mod plan;
@@ -39,6 +40,7 @@ pub mod sink;
 pub mod targets;
 
 pub use native::NativePipelineBridge;
+pub use identity::{NodeHandle, ArtifactHandle, SchemaHandle, hash_str, CURRENT_FRAME, relative_time};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -281,12 +283,15 @@ impl PipelineRuntime {
         config: &PipelineConfig,
         schema: &SignalSchema,
     ) -> Result<()> {
+        println!("[PIPELINE] Pipeline build start");
         config.validate_structure()?;
 
         if config.source.kind != SOURCE_WEBCAM {
+            println!("[ERROR] Unsupported source: {}", config.source.kind);
             return Err(AddonError::UnsupportedSource(config.source.kind.clone()));
         }
         if config.sink.kind != SINK_WINDOW {
+            println!("[ERROR] Unsupported sink: {}", config.sink.kind);
             return Err(AddonError::UnsupportedSink(config.sink.kind.clone()));
         }
 
@@ -298,16 +303,24 @@ impl PipelineRuntime {
                 .map(|i| i.to_string())
                 .collect::<Vec<_>>()
                 .join("\n");
+            println!("[ERROR] Pipeline rejected with issues: {}", rendered);
             return Err(AddonError::PipelineRejected(rendered));
         }
 
         // Instantiate each enabled node through its addon's own factory.
         // Phase 1 (D002, D006): push into RenderGraph instead of bare Vec.
         let mut new_graph = RenderGraph::new();
-        for node in &config.pipeline {
+        println!("[PIPELINE] Pipeline node count: {}", config.pipeline.len());
+        for (node_idx, node) in config.pipeline.iter().enumerate() {
             if !node.enabled {
+                println!("[PIPELINE] Skipping disabled render node '{}'", node.instance_id);
                 continue;
             }
+            let node_handle = NodeHandle::new(node_idx as u32);
+            println!(
+                "[PIPELINE] Render node mapping: render node '{}' (addon: '{}') assigned NodeHandle({})",
+                node.instance_id, node.addon, node_handle.raw()
+            );
             let entry = self
                 .registry
                 .get(&node.addon)
@@ -386,7 +399,18 @@ impl PipelineRuntime {
                             fields: semantic_fields,
                         };
 
-                        Box::new(NativePipelineBridge::new(
+                        let vertex_entry = entry.manifest.shaders.iter()
+                            .find(|s| s.stage == "vertex")
+                            .map(|s| s.entry.as_str())
+                            .unwrap_or("vs_main");
+
+                        let fragment_entry = entry.manifest.shaders.iter()
+                            .find(|s| s.stage == "fragment")
+                            .map(|s| s.entry.as_str())
+                            .unwrap_or("fs_main");
+
+                         Box::new(NativePipelineBridge::new(
+                            node_handle,
                             device,
                             &self.host.layout,
                             &self.image.layout,
@@ -399,13 +423,16 @@ impl PipelineRuntime {
                             &layout_plan,
                             instance_schema,
                             node.config.clone(),
+                            vertex_entry,
+                            fragment_entry,
                         ))
                     } else {
                         self.build_external(device, entry, &resolved, &signals)?
                     }
                 }
             };
-            new_graph.push(node.instance_id.clone(), instance);
+            println!("[PIPELINE] Pushing node to RenderGraph: NodeHandle({}), instance_id: '{}'", node_handle.raw(), node.instance_id);
+            new_graph.push(node_handle, node.instance_id.clone(), instance);
         }
 
         // Phase 2 (D004, I006, I015): advance epoch, compile immutable plan.
@@ -413,6 +440,10 @@ impl PipelineRuntime {
         // cannot mutate this plan (I018).
         let new_epoch = self.current_epoch.next();
         let new_plan = ExecutionPlan::compile(new_epoch, &new_graph);
+        println!(
+            "[PIPELINE] ExecutionPlan created: epoch = {}, node count = {}, hash = {}",
+            new_epoch.raw(), new_plan.node_count, new_plan.plan_hash
+        );
 
         self.graph = new_graph;
         self.current_epoch = new_epoch;
@@ -520,6 +551,16 @@ impl PipelineRuntime {
 
                 let layout_plan = LayoutPlan::compile(&semantic_fields, PackingProfile::VertexInstanced);
 
+                let vertex_entry = entry.manifest.shaders.iter()
+                    .find(|s| s.stage == "vertex")
+                    .map(|s| s.entry.as_str())
+                    .unwrap_or("vs_main");
+
+                let fragment_entry = entry.manifest.shaders.iter()
+                    .find(|s| s.stage == "fragment")
+                    .map(|s| s.entry.as_str())
+                    .unwrap_or("fs_main");
+
                 Ok(crate::addons::instanced_external_node(
                     device,
                     &self.host.layout,
@@ -530,6 +571,8 @@ impl PipelineRuntime {
                     &params,
                     signals,
                     &layout_plan,
+                    vertex_entry,
+                    fragment_entry,
                 ))
             }
         }
@@ -562,10 +605,23 @@ impl PipelineRuntime {
         surface_view: &TextureView,
         time: f32,
         signals: &SignalSnapshot,
-        staged_artifacts: Vec<(String, crate::runtime::artifact::RenderArtifact)>,
+        staged_artifacts: Vec<(crate::runtime::NodeHandle, crate::runtime::ArtifactHandle, crate::runtime::artifact::RenderArtifact)>,
     ) {
         if self.current_plan.is_none() {
+            crate::trace_log!("WARNING", "render called but current_plan is None; skipping render");
             return; // no valid build
+        }
+
+        crate::trace_log!("RUNTIME", "EXECUTION PLAN");
+        crate::trace_log!("RUNTIME", "  active graph nodes count: {}", self.graph.len());
+        for gn in self.graph.nodes() {
+            crate::trace_log!(
+                "RUNTIME",
+                "  node: slot = {}, instance_id = {}, NodeHandle({})",
+                gn.slot,
+                gn.instance_id,
+                gn.node_handle.raw()
+            );
         }
 
         let dt = if let Some(last) = self.last_time {
@@ -584,9 +640,9 @@ impl PipelineRuntime {
         );
         host_api.set_timing(time, dt);
 
-        for (instance_id, artifact) in staged_artifacts {
-            if let Err(e) = host_api.publish_artifact(instance_id, artifact, self.current_epoch) {
-                eprintln!("[runtime] artifact validation failed: {:?}", e);
+        for (node_handle, art_handle, artifact) in staged_artifacts {
+            if let Err(e) = host_api.publish_artifact_v2(node_handle, art_handle, artifact, self.current_epoch) {
+                crate::trace_log!("WARNING", "artifact validation failed: {:?}", e);
             }
         }
         
@@ -597,9 +653,15 @@ impl PipelineRuntime {
         
         let valid_artifacts = host_api.drain_staged();
         for staged in valid_artifacts {
-            let key = crate::runtime::BrokerKey::new(self.current_epoch, staged.instance_id.clone());
-            if let Err(e) = self.broker.materialize(device, queue, key, &staged.artifact) {
-                eprintln!("[runtime] materialization failed: {:?}", e);
+            let key = crate::runtime::BrokerKey::new(self.current_epoch, staged.node_handle, staged.artifact_handle);
+            if let Err(e) = self.broker.materialize(device, queue, key.clone(), &staged.artifact) {
+                crate::trace_log!("WARNING", "materialization failed: {:?}", e);
+            }
+            if let Some(res) = self.broker.get(&key) {
+                crate::trace_log!("RUNTIME", "Handle Created");
+                crate::trace_log!("RUNTIME", "  rows: {}", res.last_row_count);
+                crate::trace_log!("RUNTIME", "  stride: {}", res.layout.as_ref().map(|l| l.stride()).unwrap_or(0));
+                crate::trace_log!("RUNTIME", "  buffer exists: true");
             }
         }
 
@@ -629,6 +691,7 @@ impl PipelineRuntime {
         // groups, no pipeline recompilation — just bytes uploaded to existing
         // buffers. Nodes that consume nothing do nothing here.
         // Phase 1 (D002): iterate over RenderGraph nodes.
+        crate::trace_log!("RUNTIME", "Preparing node signals");
         for gn in self.graph.nodes_mut() {
             gn.node.prepare(queue, signals);
         }
@@ -643,7 +706,13 @@ impl PipelineRuntime {
         });
 
         let n = node_count;
+        crate::trace_log!("RUNTIME", "Processing graph nodes: node_count = {}", n);
         for (i, gn) in self.graph.nodes().iter().enumerate() {
+            crate::trace_log!(
+                "RUNTIME",
+                "Processing graph node: index = {}, NodeHandle = NodeHandle({}), instance_id = '{}'",
+                i, gn.node_handle.raw(), gn.instance_id
+            );
             let input_bg = if i == 0 {
                 source_bg
             } else {
@@ -651,11 +720,17 @@ impl PipelineRuntime {
             };
 
             // Look up materialized resources from broker
-            let key = crate::runtime::BrokerKey::new(self.current_epoch, gn.instance_id.clone());
+            let key = crate::runtime::BrokerKey::new(
+                self.current_epoch,
+                gn.node_handle,
+                crate::runtime::ArtifactHandle::new(crate::runtime::hash_str("instances")),
+            );
             let resources = self.broker.get(&key).map(|res| crate::runtime::context::MaterializedResources {
                 instance_buffer: Some(&res.buffer),
                 row_count: res.last_row_count as u32,
             });
+
+            crate::trace_log!("RUNTIME", "Attach Resources");
 
             let mut ctx = FrameContext {
                 encoder: &mut encoder,
@@ -664,7 +739,28 @@ impl PipelineRuntime {
                 output: &self.targets[i & 1].view,
                 resources,
             };
+
+            crate::trace_log!("FRAME", "Frame context setup:");
+            crate::trace_log!("FRAME", "  resources attached: {}", ctx.resources.is_some());
+            if let Some(res) = &ctx.resources {
+                crate::trace_log!("FRAME", "  instance buffer exists: {}", res.instance_buffer.is_some());
+                crate::trace_log!("FRAME", "  row count: {}", res.row_count);
+            } else {
+                crate::trace_log!("FRAME", "  instance buffer exists: false");
+                crate::trace_log!("FRAME", "  row count: 0");
+            }
+
+            crate::trace_log!(
+                "RENDER_GRAPH",
+                "RENDER GRAPH PASS START: node_index = {}, NodeHandle = NodeHandle({}), instance_id = '{}'",
+                i, gn.node_handle.raw(), gn.instance_id
+            );
             gn.node.process(&mut ctx);
+            crate::trace_log!(
+                "RENDER_GRAPH",
+                "RENDER GRAPH PASS END: node_index = {}, NodeHandle = NodeHandle({})",
+                i, gn.node_handle.raw()
+            );
         }
 
         let final_bg = if n == 0 {
@@ -672,20 +768,38 @@ impl PipelineRuntime {
         } else {
             &self.bg_targets[(n - 1) & 1]
         };
+
+        crate::trace_log!("PRESENT", "Executing final sink blit pass: node index = {}", n);
         self.sink.blit(&mut encoder, final_bg, surface_view);
 
+        crate::trace_log!("QUEUE", "Submitting command encoder to queue");
         queue.submit(Some(encoder.finish()));
+
+        crate::trace_log!("PRESENT", "Done");
 
         // Phase 4 (I020): Post-frame sweep. Evict idle resources whose Grace
         // Window has expired. Called AFTER submit so GPU work is already queued;
         // dropping the buffer here is safe because the GPU references a handle,
         // not the Rust object. Buffers in Active state are never evicted.
+        println!("[RUNTIME] Initiating post-frame sweep on ResourceBroker");
         self.broker.sweep();
     }
 
     /// Read-only access to the Broker for diagnostics / debug visualizer.
     pub fn broker(&self) -> &ResourceBroker {
         &self.broker
+    }
+
+    pub fn current_epoch(&self) -> PlanEpoch {
+        self.current_epoch
+    }
+
+    pub fn current_plan_hash(&self) -> Option<u64> {
+        self.current_plan.as_ref().map(|p| p.plan_hash)
+    }
+
+    pub fn graph_len(&self) -> usize {
+        self.graph.len()
     }
 }
 

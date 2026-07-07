@@ -23,7 +23,7 @@ pub fn signals_layout(device: &Device) -> BindGroupLayout {
         label: Some("signals_group3"),
         entries: &[BindGroupLayoutEntry {
             binding: 0,
-            visibility: ShaderStages::FRAGMENT,
+            visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
             ty: BindingType::Buffer {
                 ty: BufferBindingType::Uniform,
                 has_dynamic_offset: false,

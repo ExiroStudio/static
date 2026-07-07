@@ -38,6 +38,7 @@ use scheduler::BehaviorScheduler;
 /// A constructed-but-not-yet-running behavior: the node plus its config. This
 /// is the unit the engine builds and the [`BehaviorCommand::Reload`] payload.
 pub struct BehaviorInit {
+    pub node_handle: crate::runtime::NodeHandle,
     pub instance_id: String,
     pub node: Box<dyn BehaviorNode>,
     /// Signals this behavior publishes (feeds the schema builder).
@@ -96,7 +97,7 @@ impl BehaviorRuntime {
         schema: Arc<SignalSchema>,
         frame: FrameSource,
         initial: Vec<BehaviorInit>,
-        artifact_tx: Option<std::sync::mpsc::Sender<(String, crate::runtime::artifact::RenderArtifact)>>,
+        artifact_tx: Option<std::sync::mpsc::Sender<(crate::runtime::NodeHandle, crate::runtime::ArtifactHandle, crate::runtime::artifact::RenderArtifact)>>,
     ) -> BehaviorHandle {
         let running = Arc::new(AtomicBool::new(true));
         let stats = Arc::new(BehaviorStatsShared::default());

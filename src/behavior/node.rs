@@ -78,24 +78,24 @@ impl<'a> BehaviorStartCtx<'a> {
 
 /// Per-`update` context. Exposes ONLY frame, publish, config, timing.
 pub struct BehaviorCtx<'a> {
-    pub(crate) instance_id: String,
+    pub(crate) node_handle: crate::runtime::NodeHandle,
     frame: Option<FrameView<'a>>,
     publisher: &'a mut SignalPublisher,
     config: ResolvedConfig<'a>,
     timing: Timing,
-    pub(crate) artifact: Option<crate::runtime::artifact::RenderArtifact>,
+    pub(crate) artifact: Option<(crate::runtime::ArtifactHandle, crate::runtime::artifact::RenderArtifact)>,
 }
 
 impl<'a> BehaviorCtx<'a> {
     pub(crate) fn new(
-        instance_id: String,
+        node_handle: crate::runtime::NodeHandle,
         frame: Option<FrameView<'a>>,
         publisher: &'a mut SignalPublisher,
         config: ResolvedConfig<'a>,
         timing: Timing,
     ) -> Self {
         Self {
-            instance_id,
+            node_handle,
             frame,
             publisher,
             config,
@@ -120,15 +120,19 @@ impl<'a> BehaviorCtx<'a> {
     ///
     /// The runtime enforces a maximum of one artifact per behavior per frame
     /// (last-write-wins).
-    pub fn publish_artifact(&mut self, artifact: crate::runtime::artifact::RenderArtifact) {
+    pub fn publish_artifact(
+        &mut self,
+        artifact_handle: crate::runtime::ArtifactHandle,
+        artifact: crate::runtime::artifact::RenderArtifact,
+    ) {
         if self.artifact.is_some() {
             #[cfg(debug_assertions)]
             eprintln!(
-                "[behavior] warning: multiple artifacts published for {}, overwriting",
-                self.instance_id
+                "[behavior] warning: multiple artifacts published for NodeHandle({}), overwriting",
+                self.node_handle.raw()
             );
         }
-        self.artifact = Some(artifact);
+        self.artifact = Some((artifact_handle, artifact));
     }
 
     #[allow(dead_code)] // contract surface; `time` uses only `timing`

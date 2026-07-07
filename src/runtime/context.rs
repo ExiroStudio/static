@@ -176,7 +176,7 @@ pub fn params_layout(device: &Device, label: &str) -> BindGroupLayout {
         label: Some(label),
         entries: &[BindGroupLayoutEntry {
             binding: 0,
-            visibility: ShaderStages::FRAGMENT,
+            visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
             ty: BindingType::Buffer {
                 ty: BufferBindingType::Uniform,
                 has_dynamic_offset: false,

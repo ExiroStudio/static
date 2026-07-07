@@ -281,6 +281,7 @@ pub fn native_init(
     enabled: bool,
 ) -> BehaviorInit {
     BehaviorInit {
+        node_handle: crate::runtime::NodeHandle::new(0),
         instance_id,
         node: Box::new(NativeBehaviorBridge::new(entry_path, values.clone())),
         publish,
