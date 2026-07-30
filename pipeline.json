@@ -5,12 +5,12 @@
     "type": "webcam",
     "config": {
       "device_id": {
-        "Index": 2
+        "Index": 0
       },
-      "fps": 60,
-      "height": 1080,
-      "pixel_format": "YUYV",
-      "width": 1920
+      "fps": 30,
+      "height": 720,
+      "pixel_format": "MJPEG",
+      "width": 1280
     }
   },
   "pipeline": [

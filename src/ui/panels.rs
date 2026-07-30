@@ -80,9 +80,6 @@ struct Intents {
 }
 
 pub fn draw(ctx: &Context, engine: &mut Engine, state: &mut UiState) {
-    let t = ctx.animate_bool_with_time(Id::new("workspace_open"), state.open, 0.15);
-    let visible = t > 0.001;
-
     // ---------- snapshot (immutable borrows of engine end here) ----------
     let used: HashSet<String> = engine
         .config()
@@ -211,18 +208,14 @@ pub fn draw(ctx: &Context, engine: &mut Engine, state: &mut UiState) {
         ..Default::default()
     };
 
-    // ---------- the sliding workspace panel ----------
-    if visible {
-        egui::SidePanel::right("workspace")
-            .exact_width(340.0 * t)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.add_space(6.0);
-                ui.heading("⚙  Workspace");
-                ui.label(RichText::new("webcam  →  filters  →  window").small().weak());
-                ui.separator();
+    // ---------- the settings window ----------
+    if state.open {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(6.0);
+            ui.label(RichText::new("webcam  →  filters  →  window").small().weak());
+            ui.separator();
 
-                egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
                     input_section(ui, &state.available_cameras, &current_camera, &state.available_modes, current_mode.as_ref(), &state.camera_status, &mut intents);
                     ui.add_space(10.0);
                     ui.separator();

@@ -7,6 +7,7 @@ use wgpu::*;
 use winit::window::Window;
 
 pub struct GpuContext {
+    pub instance: Instance,
     pub surface: Surface<'static>,
     pub device: Device,
     pub queue: Queue,
@@ -65,6 +66,7 @@ impl GpuContext {
         surface.configure(&device, &config);
 
         Self {
+            instance,
             surface,
             device,
             queue,

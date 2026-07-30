@@ -100,7 +100,7 @@ impl Ui {
     /// Paint the UI built by [`build`](Self::build) on top of `view` (the
     /// surface frame the engine just rendered the preview into), in its own
     /// encoder, loading the existing contents so it composites over the preview.
-    pub fn paint(&mut self, device: &Device, queue: &Queue, view: &TextureView, size_px: [u32; 2]) {
+    pub fn paint(&mut self, device: &Device, queue: &Queue, view: &TextureView, size_px: [u32; 2], clear_color: Option<wgpu::Color>) {
         let Some(data) = self.pending.take() else {
             return;
         };
@@ -126,7 +126,10 @@ impl Ui {
                     view,
                     resolve_target: None,
                     ops: Operations {
-                        load: LoadOp::Load, // composite over the preview
+                        load: match clear_color {
+                            Some(color) => LoadOp::Clear(color),
+                            None => LoadOp::Load, // composite over the preview
+                        },
                         store: StoreOp::Store,
                     },
                 })],

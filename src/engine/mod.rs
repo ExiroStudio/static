@@ -285,9 +285,19 @@ impl Engine {
         &self.gpu.device
     }
 
+    /// The GPU queue.
+    pub fn queue(&self) -> &Queue {
+        &self.gpu.queue
+    }
+
     /// The swapchain texture format the UI must paint into.
     pub fn surface_format(&self) -> TextureFormat {
         self.gpu.config.format
+    }
+
+    /// Create a new surface for a secondary window.
+    pub fn create_surface(&self, window: Arc<Window>) -> Surface<'static> {
+        self.gpu.instance.create_surface(window).expect("failed to create surface")
     }
 
     /// The last reload error in plain language, if the current `config` failed
