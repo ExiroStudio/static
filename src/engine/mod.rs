@@ -47,6 +47,8 @@ use gpu::GpuContext;
 use reload::ReloadState;
 use video::VideoTexture;
 
+use crate::output::{OutputScheduler, FrameDistributionService, VirtualCameraSink};
+
 /// Where the engine looks for the pipeline definition, relative to the working
 /// directory. Missing or invalid → the built-in default pipeline is used.
 const PIPELINE_PATH: &str = "pipeline.json";
@@ -108,6 +110,11 @@ pub struct Engine {
     /// LAST field dropped during unwinding/destruction, avoiding Surface
     /// teardown while stack-resident SurfaceTextures are still alive.
     gpu: GpuContext,
+
+    // Output Framework
+    output_scheduler: OutputScheduler,
+    frame_dist: FrameDistributionService,
+    virtual_camera: Option<VirtualCameraSink>,
 }
 
 /// Debounce for persisting hot behavior edits (matches the reload debounce).
@@ -211,6 +218,16 @@ impl Engine {
         let (artifact_tx, artifact_rx) = std::sync::mpsc::channel();
         let behavior = BehaviorRuntime::spawn(publisher, schema.clone(), frame, inits, Some(artifact_tx));
 
+        let mut output_scheduler = OutputScheduler::new();
+        let frame_dist = FrameDistributionService::new();
+        let mut virtual_camera = None;
+        
+        // Start Virtual Camera proof of concept (30 FPS)
+        // Ignoring permissions/errors for now since it's a stub
+        let mut vc = VirtualCameraSink::new(gpu.config.width, gpu.config.height, 30.0);
+        vc.start(&mut output_scheduler);
+        virtual_camera = Some(vc);
+
         Self {
             gpu,
             video,
@@ -236,6 +253,9 @@ impl Engine {
             cur_signal_hz: 0.0,
             save_at: None,
             total_frames: 0,
+            output_scheduler,
+            frame_dist,
+            virtual_camera,
         }
     }
 
@@ -584,6 +604,12 @@ impl Engine {
             &self.signals,
             staged_artifacts,
         ); // encoder #1 (submits)
+
+        let current_time_f64 = self.start.elapsed().as_secs_f64();
+        self.frame_dist.clear_cache();
+        if let Some(vc) = &mut self.virtual_camera {
+            vc.render(current_time_f64, self.total_frames, &mut self.output_scheduler, &mut self.frame_dist);
+        }
 
         self.log_stats();
 

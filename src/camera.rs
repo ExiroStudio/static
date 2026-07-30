@@ -129,7 +129,7 @@ impl FrameSource {
 fn capture_loop(shared: Arc<Mutex<FrameSlot>>, dims_tx: mpsc::Sender<(u32, u32)>) {
     let format = RequestedFormat::new::<RgbAFormat>(
         RequestedFormatType::Closest(CameraFormat::new(
-            Resolution::new(1280, 720),
+            Resolution::new(640, 480),
             FrameFormat::MJPEG,
             60,
         )),
