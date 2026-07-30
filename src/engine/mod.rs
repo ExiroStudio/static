@@ -37,7 +37,7 @@ use crate::behavior::{
     BehaviorHandle, BehaviorHost, BehaviorInit, BehaviorRuntime, addons, builtins,
 };
 use crate::behavior::native;
-use crate::camera::{FrameSource, WebcamCapture};
+use crate::camera::{CameraId, CaptureMode, FrameSource, WebcamCapture};
 use crate::runtime::{PipelineRuntime, SINK_WINDOW, SOURCE_WEBCAM};
 use crate::signal::{
     SchemaError, SignalReader, SignalSchema, SignalSchemaBuilder, SignalSnapshot, SignalStore,
@@ -138,6 +138,7 @@ impl Engine {
         cam_width: u32,
         cam_height: u32,
         frame: FrameSource,
+        config: PipelineConfig,
     ) -> Self {
         let gpu = GpuContext::new(window).await;
 
@@ -182,8 +183,6 @@ impl Engine {
                 crate::behavior::addons::face_tracking_lite::init_with,
             )
             .expect("register face-tracking-lite behavior");
-
-        let config = load_pipeline_config();
 
         // Build the schema from the config's behaviors (publish) + filters
         // (consume), then the store + filters — all before the first frame.
@@ -298,6 +297,29 @@ impl Engine {
     }
 
     // ---- UI-facing edit API (mutate the document, schedule a rebuild) ----
+
+    pub fn set_camera(&mut self, device_id: CameraId, mode: Option<CaptureMode>) {
+        if let Ok(val) = serde_json::to_value(device_id) {
+            if !self.config.source.config.is_object() {
+                self.config.source.config = serde_json::Value::Object(Default::default());
+            }
+            if let Some(obj) = self.config.source.config.as_object_mut() {
+                obj.insert("device_id".to_string(), val);
+                if let Some(m) = mode {
+                    obj.insert("width".to_string(), serde_json::json!(m.width));
+                    obj.insert("height".to_string(), serde_json::json!(m.height));
+                    obj.insert("fps".to_string(), serde_json::json!(m.fps));
+                    obj.insert("pixel_format".to_string(), serde_json::json!(m.pixel_format));
+                } else {
+                    obj.remove("width");
+                    obj.remove("height");
+                    obj.remove("fps");
+                    obj.remove("pixel_format");
+                }
+                self.reload.mark_dirty();
+            }
+        }
+    }
 
     /// Set one parameter on a node. Continuous edit → debounced apply.
     pub fn set_param(&mut self, instance_id: &str, key: &str, value: ParamValue) {
@@ -555,8 +577,15 @@ impl Engine {
         crate::trace_log!("ENGINE", "Camera Upload Begin");
 
         // Stream the newest webcam frame to the GPU (the source).
-        if camera.copy_latest(&mut self.frame_buf) && !self.frame_buf.is_empty() {
-            self.video.upload(&self.gpu.queue, &self.frame_buf);
+        if let Some((cw, ch)) = camera.copy_latest(&mut self.frame_buf) {
+            if !self.frame_buf.is_empty() {
+                if cw != self.video.width || ch != self.video.height {
+                    crate::trace_log!("ENGINE", "Camera resolution changed to {}x{}, recreating VideoTexture", cw, ch);
+                    self.video = crate::engine::video::VideoTexture::new(&self.gpu.device, cw, ch);
+                    self.runtime.set_source(&self.gpu.device, &self.video.view);
+                }
+                self.video.upload(&self.gpu.queue, &self.frame_buf);
+            }
         }
         crate::trace_log!("ENGINE", "Camera Upload End");
 
@@ -683,7 +712,7 @@ impl Engine {
 /// missing or unreadable. Structural problems in an existing file are surfaced
 /// (panic) rather than silently swallowed, since the user clearly intended to
 /// drive the pipeline from disk.
-fn load_pipeline_config() -> PipelineConfig {
+pub fn load_pipeline_config() -> PipelineConfig {
     let path = Path::new(PIPELINE_PATH);
     if path.exists() {
         match PipelineConfig::load(path) {

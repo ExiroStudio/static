@@ -3,13 +3,21 @@
   "name": "Face mask — surveillance ASCII",
   "source": {
     "type": "webcam",
-    "config": {}
+    "config": {
+      "device_id": {
+        "Index": 2
+      },
+      "fps": 60,
+      "height": 1080,
+      "pixel_format": "YUYV",
+      "width": 1920
+    }
   },
   "pipeline": [
     {
       "instance_id": "fMHtmk0Ceq",
       "addon": "ascii-mask-overlay",
-      "enabled": true,
+      "enabled": false,
       "config": {
         "mask_size": 0.1,
         "mirror_x": false,
@@ -42,7 +50,7 @@
     {
       "instance_id": "X2XnVg1sXW",
       "addon": "glitch-monitor",
-      "enabled": true,
+      "enabled": false,
       "config": {
         "block_size": 8.0,
         "displacement": 0.06,

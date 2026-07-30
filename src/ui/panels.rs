@@ -15,6 +15,7 @@ use egui::{Align, Align2, Color32, Context, Id, Layout, RichText, Sense, Stroke}
 use crate::addon::manifest::AddonKind;
 use crate::addon::schema::{ParamMap, ParamSpec, ParamValue};
 use crate::engine::Engine;
+use crate::camera::{CameraId, CaptureMode};
 use crate::signal::{SignalKind, SignalValue};
 
 use super::state::UiState;
@@ -65,6 +66,10 @@ struct Intents {
     param_edits: Vec<(String, ParamValue)>,
     prop_instance: Option<String>,
 
+    camera_edit: Option<CameraId>,
+    mode_edit: Option<CaptureMode>,
+    refresh_cameras: bool,
+
     // ---- behavior intents (unordered set) ----
     beh_select: Option<String>,
     beh_toggle: Option<(String, bool)>,
@@ -114,6 +119,29 @@ pub fn draw(ctx: &Context, engine: &mut Engine, state: &mut UiState) {
             values: node.config.clone(),
         })
     });
+
+    let current_camera = engine.config().source.config.get("device_id")
+        .and_then(|v| serde_json::from_value::<CameraId>(v.clone()).ok())
+        .unwrap_or(CameraId::Index(0));
+        
+    let current_mode = {
+        let conf = &engine.config().source.config;
+        let w = conf.get("width").and_then(|v| v.as_u64());
+        let h = conf.get("height").and_then(|v| v.as_u64());
+        let f = conf.get("fps").and_then(|v| v.as_u64());
+        let fmt = conf.get("pixel_format").and_then(|v| v.as_str());
+        
+        if let (Some(w), Some(h), Some(f), Some(fmt)) = (w, h, f, fmt) {
+            Some(CaptureMode {
+                width: w as u32,
+                height: h as u32,
+                fps: f as u32,
+                pixel_format: fmt.to_string(),
+            })
+        } else {
+            None
+        }
+    };
 
     // Behaviors (unordered producer set) + the selected behavior's properties.
     let behaviors: Vec<NodeRow> = engine
@@ -195,6 +223,9 @@ pub fn draw(ctx: &Context, engine: &mut Engine, state: &mut UiState) {
                 ui.separator();
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    input_section(ui, &state.available_cameras, &current_camera, &state.available_modes, current_mode.as_ref(), &state.camera_status, &mut intents);
+                    ui.add_space(10.0);
+                    ui.separator();
                     pipeline_section(ui, &nodes, &mut intents, state);
                     ui.add_space(10.0);
                     ui.separator();
@@ -233,6 +264,17 @@ pub fn draw(ctx: &Context, engine: &mut Engine, state: &mut UiState) {
     // ---------- apply intents (mutable borrow of engine) ----------
     if let Some(id) = intents.select {
         state.selected = Some(id);
+    }
+    if let Some(device_id) = intents.camera_edit {
+        // App will handle available_modes query on device_id change, we just need to pass None for mode to clear it 
+        // until App sets it. Wait, if we pass None, it will clear it in the JSON config.
+        engine.set_camera(device_id, None);
+    }
+    if let Some(mode) = intents.mode_edit {
+        engine.set_camera(current_camera.clone(), Some(mode));
+    }
+    if intents.refresh_cameras {
+        state.available_cameras = crate::camera::available_cameras();
     }
     if let Some((id, enabled)) = intents.toggle {
         engine.set_enabled(&id, enabled);
@@ -284,6 +326,86 @@ pub fn draw(ctx: &Context, engine: &mut Engine, state: &mut UiState) {
     if let (Some(p), false) = (&intents.beh_prop_instance, intents.beh_param_edits.is_empty()) {
         for (key, value) in intents.beh_param_edits {
             engine.set_behavior_param(p, &key, value);
+        }
+    }
+}
+
+fn input_section(
+    ui: &mut egui::Ui,
+    available_cameras: &[crate::camera::CameraInfo],
+    current_camera: &CameraId,
+    available_modes: &[CaptureMode],
+    current_mode: Option<&CaptureMode>,
+    camera_status: &crate::camera::CameraStatus,
+    intents: &mut Intents,
+) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("INPUT").small().strong());
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui.button("🔄 Refresh").clicked() {
+                intents.refresh_cameras = true;
+            }
+        });
+    });
+    ui.add_space(2.0);
+
+    ui.label("Camera");
+    let current_name = available_cameras
+        .iter()
+        .find(|c| c.id == *current_camera)
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| "Unknown Camera".to_string());
+
+    egui::ComboBox::from_id_source("camera_select")
+        .selected_text(current_name)
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            for cam in available_cameras {
+                if ui.selectable_label(cam.id == *current_camera, &cam.name).clicked() {
+                    intents.camera_edit = Some(cam.id.clone());
+                }
+            }
+        });
+        
+    ui.add_space(4.0);
+    ui.label("Resolution");
+    
+    let mode_text = if let Some(m) = current_mode {
+        format!("{} × {} @{} [{}]", m.width, m.height, m.fps, m.pixel_format)
+    } else {
+        "Auto".to_string()
+    };
+    
+    egui::ComboBox::from_id_source("mode_select")
+        .selected_text(mode_text)
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            for mode in available_modes {
+                let text = format!("{} × {} @{}", mode.width, mode.height, mode.fps);
+                let is_selected = current_mode == Some(mode);
+                if ui.selectable_label(is_selected, text).clicked() {
+                    intents.mode_edit = Some(mode.clone());
+                }
+            }
+        });
+
+    ui.add_space(4.0);
+    ui.label("Pixel Format");
+    let fmt_text = current_mode.map(|m| m.pixel_format.as_str()).unwrap_or("Unknown");
+    ui.label(RichText::new(fmt_text).strong());
+
+    ui.add_space(4.0);
+    ui.label("Status");
+    match camera_status {
+        crate::camera::CameraStatus::Starting => {
+            ui.label(RichText::new("Starting...").color(Color32::YELLOW));
+        }
+        crate::camera::CameraStatus::Streaming => {
+            ui.label(RichText::new("Streaming").color(Color32::GREEN));
+        }
+        crate::camera::CameraStatus::Failed(err) => {
+            ui.label(RichText::new("Failed").color(Color32::RED));
+            ui.label(RichText::new(err).small().color(Color32::RED));
         }
     }
 }

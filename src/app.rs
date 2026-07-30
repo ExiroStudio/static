@@ -20,8 +20,8 @@ use winit::{
     window::{Fullscreen, Window, WindowId},
 };
 
-use crate::camera::WebcamCapture;
-use crate::engine::Engine;
+use crate::camera::{CameraId, CaptureMode, WebcamCapture};
+use crate::engine::{Engine, load_pipeline_config};
 use crate::ui::Ui;
 
 #[derive(Default)]
@@ -31,6 +31,8 @@ pub struct App {
     camera: Option<WebcamCapture>,
     ui: Option<Ui>,
     fullscreen: bool,
+    current_device_id: Option<CameraId>,
+    current_mode: Option<CaptureMode>,
 }
 
 impl ApplicationHandler for App {
@@ -50,19 +52,73 @@ impl ApplicationHandler for App {
                 .expect("failed to create window"),
         );
 
-        let camera = WebcamCapture::new().expect("failed to open webcam");
+        let mut config = load_pipeline_config();
+        let device_id = config.source.config.get("device_id")
+            .and_then(|v| serde_json::from_value::<CameraId>(v.clone()).ok())
+            .unwrap_or(CameraId::Index(0));
+
+        let saved_mode = {
+            let conf = &config.source.config;
+            let w = conf.get("width").and_then(|v| v.as_u64());
+            let h = conf.get("height").and_then(|v| v.as_u64());
+            let f = conf.get("fps").and_then(|v| v.as_u64());
+            let fmt = conf.get("pixel_format").and_then(|v| v.as_str());
+            
+            if let (Some(w), Some(h), Some(f), Some(fmt)) = (w, h, f, fmt) {
+                Some(CaptureMode {
+                    width: w as u32,
+                    height: h as u32,
+                    fps: f as u32,
+                    pixel_format: fmt.to_string(),
+                })
+            } else {
+                None
+            }
+        };
+
+        let modes = crate::camera::available_modes(&device_id);
+        let active_mode = if let Some(saved) = &saved_mode {
+            if modes.contains(saved) {
+                Some(saved.clone())
+            } else {
+                crate::camera::select_best_mode(&modes)
+            }
+        } else {
+            crate::camera::select_best_mode(&modes)
+        };
+
+        // Update config to reflect what we actually use so UI is consistent
+        if let Some(ref m) = active_mode {
+            if !config.source.config.is_object() {
+                config.source.config = serde_json::Value::Object(Default::default());
+            }
+            if let Some(obj) = config.source.config.as_object_mut() {
+                obj.insert("width".to_string(), serde_json::json!(m.width));
+                obj.insert("height".to_string(), serde_json::json!(m.height));
+                obj.insert("fps".to_string(), serde_json::json!(m.fps));
+                obj.insert("pixel_format".to_string(), serde_json::json!(m.pixel_format));
+            }
+        }
+
+        let camera = WebcamCapture::new(device_id.clone(), active_mode.clone()).expect("failed to open webcam");
         let engine = pollster::block_on(Engine::new(
             window.clone(),
             camera.width,
             camera.height,
             camera.frame_source(),
+            config,
         ));
-        let ui = Ui::new(&window, engine.device(), engine.surface_format());
+        let mut ui = Ui::new(&window, engine.device(), engine.surface_format());
+        ui.state.available_cameras = crate::camera::available_cameras();
+        ui.state.available_modes = modes;
+        ui.state.camera_status = crate::camera::CameraStatus::Starting;
 
         self.window = Some(window);
         self.camera = Some(camera);
         self.engine = Some(engine);
         self.ui = Some(ui);
+        self.current_device_id = Some(device_id);
+        self.current_mode = active_mode;
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -161,6 +217,55 @@ impl App {
         };
 
         engine.tick_reload();
+
+        let new_device_id = engine.config().source.config.get("device_id")
+            .and_then(|v| serde_json::from_value::<CameraId>(v.clone()).ok())
+            .unwrap_or(CameraId::Index(0));
+            
+        let new_mode = {
+            let conf = &engine.config().source.config;
+            let w = conf.get("width").and_then(|v| v.as_u64());
+            let h = conf.get("height").and_then(|v| v.as_u64());
+            let f = conf.get("fps").and_then(|v| v.as_u64());
+            let fmt = conf.get("pixel_format").and_then(|v| v.as_str());
+            
+            if let (Some(w), Some(h), Some(f), Some(fmt)) = (w, h, f, fmt) {
+                Some(CaptureMode {
+                    width: w as u32,
+                    height: h as u32,
+                    fps: f as u32,
+                    pixel_format: fmt.to_string(),
+                })
+            } else {
+                None
+            }
+        };
+        
+        if Some(&new_device_id) != self.current_device_id.as_ref() {
+            let modes = crate::camera::available_modes(&new_device_id);
+            ui.state.available_modes = modes.clone();
+            
+            let mut active_mode = new_mode.clone();
+            if let Some(m) = &active_mode {
+                if !modes.contains(m) {
+                    active_mode = None;
+                }
+            }
+            if active_mode.is_none() {
+                active_mode = crate::camera::select_best_mode(&modes);
+                engine.set_camera(new_device_id.clone(), active_mode.clone());
+            }
+
+            self.current_device_id = Some(new_device_id.clone());
+            self.current_mode = active_mode.clone();
+            camera.set_device(new_device_id, active_mode);
+        } else if new_mode != self.current_mode {
+            self.current_mode = new_mode.clone();
+            camera.set_device(new_device_id, new_mode);
+        }
+
+        ui.state.camera_status = camera.status.lock().unwrap().clone();
+
         ui.build(engine);
 
         // The "Install from ZIP…" button defers the native picker to here, so

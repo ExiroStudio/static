@@ -5,7 +5,8 @@
 //! [`PipelineConfig`](crate::addon::pipeline::PipelineConfig) is the single
 //! source of truth; this only holds view state.
 
-#[derive(Default)]
+use crate::camera::{CameraInfo, CaptureMode, CameraStatus};
+
 pub struct UiState {
     /// Whether the config workspace is shown (NORMAL vs CONFIG mode).
     pub open: bool,
@@ -28,6 +29,29 @@ pub struct UiState {
     pub want_install_picker: bool,
     /// Transient banner: `(is_error, message)`.
     pub notice: Option<(bool, String)>,
+    
+    pub available_cameras: Vec<CameraInfo>,
+    pub available_modes: Vec<CaptureMode>,
+    pub camera_status: CameraStatus,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            selected: None,
+            selected_behavior: None,
+            inspector_open: false,
+            show_add: false,
+            show_add_behavior: false,
+            confirm_uninstall: None,
+            want_install_picker: false,
+            notice: None,
+            available_cameras: Vec::new(),
+            available_modes: Vec::new(),
+            camera_status: CameraStatus::Starting,
+        }
+    }
 }
 
 impl UiState {
