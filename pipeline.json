@@ -15,63 +15,15 @@
   },
   "pipeline": [
     {
-      "instance_id": "fMHtmk0Ceq",
+      "instance_id": "MPfrsG8rDR",
       "addon": "ascii-mask-overlay",
-      "enabled": false,
-      "config": {
-        "mask_size": 0.1,
-        "mirror_x": false,
-        "offset_x": 0.0,
-        "offset_y": -0.03,
-        "opacity": 0.4,
-        "scale_mul": 0.91
-      }
-    },
-    {
-      "instance_id": "ztq6rAG7qw",
-      "addon": "occupancy-density",
       "enabled": true,
-      "config": {
-        "cell_size": 2.0,
-        "dot_radius": 0.14,
-        "gamma": 1.55,
-        "highlight": 0.14,
-        "highlight_ceiling": 1.0,
-        "shadow": 0.01,
-        "shadow_floor": 0.0
-      }
-    },
-    {
-      "instance_id": "nkfmUUcWvG",
-      "addon": "dot-renderer",
-      "enabled": false,
       "config": {}
-    },
-    {
-      "instance_id": "X2XnVg1sXW",
-      "addon": "glitch-monitor",
-      "enabled": false,
-      "config": {
-        "block_size": 8.0,
-        "displacement": 0.06,
-        "frequency": 0.08,
-        "intensity": 0.0
-      }
-    },
-    {
-      "instance_id": "4Q968ns5hR",
-      "addon": "crt",
-      "enabled": false,
-      "config": {
-        "aperture": 0.5599999999999999,
-        "brightness": 1.1,
-        "curvature": 0.4
-      }
     }
   ],
   "behaviors": [
     {
-      "instance_id": "k6IuglroUN",
+      "instance_id": "ZC6iSo-5R0",
       "addon": "face-tracking",
       "enabled": true,
       "config": {}
