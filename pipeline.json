@@ -3,58 +3,78 @@
   "name": "Face mask — surveillance ASCII",
   "source": {
     "type": "webcam",
-    "config": {}
+    "config": {
+      "device_id": {
+        "Index": 0
+      },
+      "fps": 30,
+      "height": 720,
+      "pixel_format": "MJPEG",
+      "width": 1280
+    }
   },
   "pipeline": [
     {
-      "instance_id": "niBPRmkO35",
+      "instance_id": "fMHtmk0Ceq",
       "addon": "ascii-mask-overlay",
-      "enabled": true,
+      "enabled": false,
       "config": {
-        "mask_size": 0.05000000074505806,
+        "mask_size": 0.1,
         "mirror_x": false,
         "offset_x": 0.0,
-        "offset_y": -0.06,
-        "opacity": 1.0,
-        "scale_mul": 2.0
+        "offset_y": -0.03,
+        "opacity": 0.4,
+        "scale_mul": 0.91
       }
     },
     {
-      "instance_id": "S5Vs7m51TU",
-      "addon": "dot-renderer",
+      "instance_id": "ztq6rAG7qw",
+      "addon": "occupancy-density",
       "enabled": true,
       "config": {
-        "contrast": 0.8
+        "cell_size": 2.0,
+        "dot_radius": 0.14,
+        "gamma": 1.55,
+        "highlight": 0.14,
+        "highlight_ceiling": 1.0,
+        "shadow": 0.01,
+        "shadow_floor": 0.0
       }
     },
     {
-      "instance_id": "WOCHk-hNIj",
-      "addon": "crt",
-      "enabled": true,
+      "instance_id": "nkfmUUcWvG",
+      "addon": "dot-renderer",
+      "enabled": false,
       "config": {}
     },
     {
-      "instance_id": "gNptGRaWrr",
+      "instance_id": "X2XnVg1sXW",
       "addon": "glitch-monitor",
-      "enabled": true,
+      "enabled": false,
       "config": {
-        "block_size": 16.0,
-        "displacement": 0.04,
-        "frequency": 0.06,
+        "block_size": 8.0,
+        "displacement": 0.06,
+        "frequency": 0.08,
         "intensity": 0.0
+      }
+    },
+    {
+      "instance_id": "4Q968ns5hR",
+      "addon": "crt",
+      "enabled": false,
+      "config": {
+        "aperture": 0.5599999999999999,
+        "brightness": 1.1,
+        "curvature": 0.4
       }
     }
   ],
   "behaviors": [
     {
-      "instance_id": "nksLwiMV3G",
+      "instance_id": "k6IuglroUN",
       "addon": "face-tracking",
       "enabled": true,
-      "config": {
-        "detection_threshold": 0.2,
-        "lost_timeout": 1.55,
-        "smoothing": 0.63
-      }
+      "config": {}
     }
   ],
   "sink": {

@@ -215,6 +215,12 @@ fn repo_pipeline_json_loads_and_validates_against_builtins() {
         let face_manifest = Manifest::load(&face_manifest_path).unwrap();
         registry.register_builtin(face_manifest).unwrap();
     }
+    // Register msdf-overlay addon from addons/ directory if present
+    let msdf_manifest_path = root.parent().unwrap().join("addons").join("msdf_overlay").join("manifest.toml");
+    if msdf_manifest_path.exists() {
+        let msdf_manifest = Manifest::load(&msdf_manifest_path).unwrap();
+        registry.register_builtin(msdf_manifest).unwrap();
+    }
 
     let issues = config.validate_against(&registry);
     assert!(

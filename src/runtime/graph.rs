@@ -18,7 +18,7 @@
 //! - **I007** — Nodes remain graph-local. `RenderGraphNode` never escapes this
 //!   module boundary into the addon or behavior layer.
 
-use crate::runtime::FilterNode;
+use crate::runtime::{FilterNode, NodeHandle};
 
 /// A single node entry inside the [`RenderGraph`].
 ///
@@ -31,6 +31,8 @@ use crate::runtime::FilterNode;
 /// This type will be renamed / exposed as `RenderNode` in Phase 3 (see **D006**
 /// and §3 of `plan.md`). For now it is graph-internal only.
 pub(crate) struct RenderGraphNode {
+    /// Opaque compiler-assigned runtime identity for the node.
+    pub(crate) node_handle: NodeHandle,
     /// The unique, stable addon instance ID. Used for stable ResourceBroker mapping.
     pub(crate) instance_id: String,
     /// Stable graph-local identity for diagnostics and future `ExecutionPlan`
@@ -69,9 +71,9 @@ impl RenderGraph {
     /// Slot indices are monotonically increasing within a graph instance and
     /// are used by [`ExecutionPlan`](super::plan::ExecutionPlan) (Phase 2) for
     /// ping-pong routing. They are **not** stable across graph rebuilds.
-    pub fn push(&mut self, instance_id: String, node: Box<dyn FilterNode>) {
+    pub fn push(&mut self, node_handle: NodeHandle, instance_id: String, node: Box<dyn FilterNode>) {
         let slot = self.nodes.len();
-        self.nodes.push(RenderGraphNode { instance_id, slot, node });
+        self.nodes.push(RenderGraphNode { node_handle, instance_id, slot, node });
     }
 
     /// The number of nodes in the graph.
@@ -99,6 +101,13 @@ impl RenderGraph {
     pub(crate) fn nodes_mut(&mut self) -> &mut [RenderGraphNode] {
         &mut self.nodes
     }
+
+    /// Look up the NodeHandle associated with an instance_id string.
+    pub fn find_node_handle(&self, instance_id: &str) -> Option<NodeHandle> {
+        self.nodes.iter()
+            .find(|n| n.instance_id == instance_id)
+            .map(|n| n.node_handle)
+    }
 }
 
 impl Default for RenderGraph {
@@ -123,9 +132,9 @@ mod tests {
     #[test]
     fn graph_slot_assignment_is_sequential() {
         let mut g = RenderGraph::new();
-        g.push("a".into(), Box::new(NoopNode));
-        g.push("b".into(), Box::new(NoopNode));
-        g.push("c".into(), Box::new(NoopNode));
+        g.push(NodeHandle::new(0), "a".into(), Box::new(NoopNode));
+        g.push(NodeHandle::new(1), "b".into(), Box::new(NoopNode));
+        g.push(NodeHandle::new(2), "c".into(), Box::new(NoopNode));
 
         assert_eq!(g.len(), 3);
         let slots: Vec<usize> = g.nodes().iter().map(|n| n.slot).collect();

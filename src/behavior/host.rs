@@ -118,6 +118,7 @@ mod tests {
     /// A `BehaviorFactory` — note this is a plain `fn`, coercible to the alias.
     fn make_noop(instance_id: String, values: ParamMap, enabled: bool) -> BehaviorInit {
         BehaviorInit {
+            node_handle: crate::runtime::NodeHandle::new(0),
             instance_id,
             node: Box::new(Noop),
             publish: vec![SignalSpec {

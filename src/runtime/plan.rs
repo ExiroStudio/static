@@ -115,6 +115,11 @@ impl ExecutionPlan {
         // In Phase 3: hash each node's schema_id and artifact type here.
         let plan_hash = hasher.finish();
 
+        println!(
+            "[PIPELINE] ExecutionPlan::compile completed: epoch = {}, node_count = {}, plan_hash = {}",
+            epoch.raw(), node_count, plan_hash
+        );
+
         Self {
             epoch,
             node_count,
@@ -137,7 +142,8 @@ mod tests {
     fn graph_with(n: usize) -> RenderGraph {
         let mut g = RenderGraph::new();
         for i in 0..n {
-            g.push(format!("node_{}", i).into(), Box::new(NoopNode));
+            let instance_id = format!("node_{}", i);
+            g.push(crate::runtime::NodeHandle::new(i as u32), instance_id, Box::new(NoopNode));
         }
         g
     }

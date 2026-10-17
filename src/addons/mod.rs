@@ -20,12 +20,12 @@ use std::collections::BTreeMap;
 use wgpu::util::DeviceExt;
 use wgpu::*;
 
-use crate::addon::manifest::{AddonKind, Manifest, CURRENT_MANIFEST_VERSION};
+use crate::addon::manifest::{AddonKind, CURRENT_MANIFEST_VERSION, Manifest};
 use crate::addon::schema::{ParamSpec, UiHints};
 use crate::effects::{fullscreen_pipeline, make_module};
 use crate::runtime::{
-    params_bind_group, params_layout, signals_layout, FilterNode, FrameContext, SignalContext,
-    SignalsBinding,
+    FilterNode, FrameContext, SignalContext, SignalsBinding, params_bind_group, params_layout,
+    signals_layout,
 };
 use crate::signal::SignalSnapshot;
 
@@ -85,7 +85,13 @@ struct ShaderNode {
 
 impl FilterNode for ShaderNode {
     fn process(&self, ctx: &mut FrameContext) {
-        record_fullscreen_pass(ctx, &self.pipeline, &self.params_bg, None, self.label.as_str());
+        record_fullscreen_pass(
+            ctx,
+            &self.pipeline,
+            &self.params_bg,
+            None,
+            self.label.as_str(),
+        );
     }
 }
 
@@ -201,6 +207,26 @@ impl FilterNode for ExternalShaderNode {
     }
 
     fn process(&self, ctx: &mut FrameContext) {
+        println!("[DRAW] Begin Pass");
+        println!("LoadOp: Clear");
+        println!("StoreOp: Store");
+        println!("output texture id: {:?}", ctx.output);
+        println!("input bind group: {:?}", ctx.input_bg);
+        println!("host bind group: {:?}", ctx.host_bg);
+        println!("params bind group: {:?}", self.params_bg);
+        println!("signals bind group: {:?}", self.signals.as_ref().map(|s| s.bind_group()));
+
+        println!("[DRAW] Buffer Exists");
+        println!("buffer handle: None");
+        println!("buffer size: 0");
+        println!("row count: 1");
+        println!("stride: 0");
+        println!("vertex layout: None");
+        
+        println!("[DRAW] DRAW EXECUTED");
+        println!("instances=1");
+        println!("vertices=3");
+
         record_fullscreen_pass(
             ctx,
             &self.pipeline,
@@ -208,6 +234,8 @@ impl FilterNode for ExternalShaderNode {
             self.signals.as_ref().map(SignalsBinding::bind_group),
             &self.label,
         );
+
+        println!("[DRAW] End Pass");
     }
 }
 
@@ -279,12 +307,20 @@ struct ExternalInstancedNode {
 
 impl FilterNode for ExternalInstancedNode {
     fn prepare(&mut self, queue: &Queue, signals: &SignalSnapshot) {
+        crate::trace_log!("DRAW", "Prepare");
+        crate::trace_log!("DRAW", "  signals present: {}", self.signals.is_some());
+        crate::trace_log!("DRAW", "  params present: true");
         if let Some(bg) = self.signals.as_mut() {
             bg.update(queue, signals);
         }
     }
 
     fn process(&self, ctx: &mut FrameContext) {
+        crate::trace_log!("DRAW", "Begin Pass");
+        crate::trace_log!("DRAW", "  LoadOp: Load");
+        crate::trace_log!("DRAW", "  StoreOp: Store");
+        crate::trace_log!("DRAW", "  output texture view: {:p}", ctx.output);
+
         let mut pass = ctx.encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("ExternalInstancedNode pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
@@ -300,22 +336,45 @@ impl FilterNode for ExternalInstancedNode {
             timestamp_writes: None,
         });
 
+        crate::trace_log!("WGPU", "wgpu::RenderPass created: target view = {:p}", ctx.output);
         pass.set_pipeline(&self.pipeline);
+        crate::trace_log!("WGPU", "Pipeline bound successfully");
+
         pass.set_bind_group(0, ctx.host_bg, &[]);
         pass.set_bind_group(1, ctx.input_bg, &[]);
         pass.set_bind_group(2, &self.params_bg, &[]);
+        let mut binds_count = 3;
         if let Some(bg) = self.signals.as_ref().map(SignalsBinding::bind_group) {
             pass.set_bind_group(3, bg, &[]);
+            binds_count += 1;
         }
+        crate::trace_log!("WGPU", "Bind groups bound: count = {}", binds_count);
 
         if let Some(res) = &ctx.resources {
+            crate::trace_log!("DRAW", "Buffer Exists");
+            crate::trace_log!("DRAW", "  row_count: {}", res.row_count);
+
             if let Some(buf) = res.instance_buffer {
+                crate::trace_log!("WGPU", "Vertex buffer slot 0 bound: offset = 0");
                 pass.set_vertex_buffer(0, buf.slice(..));
+            } else {
+                crate::trace_log!("WARNING", "instance_buffer is None; skipping set_vertex_buffer");
             }
+
             if res.row_count > 0 {
+                crate::trace_log!("DRAW", "DRAW EXECUTED");
+                crate::trace_log!("DRAW", "  instances: {}", res.row_count);
+                crate::trace_log!("DRAW", "  vertices: 6");
+                crate::trace_log!("WGPU", "draw call executed: vertex_range = 0..6, instance_range = 0..{}", res.row_count);
                 pass.draw(0..6, 0..res.row_count);
+            } else {
+                crate::trace_log!("WARNING", "DRAW SKIPPED: row_count is 0");
             }
+        } else {
+            crate::trace_log!("WARNING", "DRAW SKIPPED: ctx.resources is None");
         }
+        
+        crate::trace_log!("DRAW", "End Pass");
     }
 }
 
@@ -329,6 +388,8 @@ pub fn instanced_external_node(
     params: &[f32],
     signals: &SignalContext,
     layout_plan: &crate::runtime::packing::LayoutPlan,
+    vertex_entry: &str,
+    fragment_entry: &str,
 ) -> Box<dyn FilterNode> {
     let mut floats = params.to_vec();
     while floats.is_empty() || floats.len() % 4 != 0 {
@@ -366,13 +427,13 @@ pub fn instanced_external_node(
         layout: Some(&pipeline_layout),
         vertex: VertexState {
             module: &module,
-            entry_point: "vs_main",
+            entry_point: vertex_entry,
             buffers: &[vertex_layout],
             compilation_options: Default::default(),
         },
         fragment: Some(FragmentState {
             module: &module,
-            entry_point: "fs_main",
+            entry_point: fragment_entry,
             targets: &[Some(ColorTargetState {
                 format,
                 blend: Some(BlendState::REPLACE),

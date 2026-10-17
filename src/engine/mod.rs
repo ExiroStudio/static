@@ -37,7 +37,7 @@ use crate::behavior::{
     BehaviorHandle, BehaviorHost, BehaviorInit, BehaviorRuntime, addons, builtins,
 };
 use crate::behavior::native;
-use crate::camera::{FrameSource, WebcamCapture};
+use crate::camera::{CameraId, CaptureMode, FrameSource, WebcamCapture};
 use crate::runtime::{PipelineRuntime, SINK_WINDOW, SOURCE_WEBCAM};
 use crate::signal::{
     SchemaError, SignalReader, SignalSchema, SignalSchemaBuilder, SignalSnapshot, SignalStore,
@@ -46,6 +46,8 @@ use crate::signal::{
 use gpu::GpuContext;
 use reload::ReloadState;
 use video::VideoTexture;
+
+use crate::output::{OutputScheduler, FrameDistributionService, VirtualCameraSink};
 
 /// Where the engine looks for the pipeline definition, relative to the working
 /// directory. Missing or invalid → the built-in default pipeline is used.
@@ -80,7 +82,7 @@ pub struct Engine {
     /// Control handle for the behavior thread. Dropping it stops + joins.
     behavior: BehaviorHandle,
     /// Channel receiver for rendered artifacts published by behaviors.
-    artifact_rx: std::sync::mpsc::Receiver<(String, crate::runtime::artifact::RenderArtifact)>,
+    artifact_rx: std::sync::mpsc::Receiver<(crate::runtime::NodeHandle, crate::runtime::ArtifactHandle, crate::runtime::artifact::RenderArtifact)>,
     /// Wall time of the last structural rebuild (diagnostics).
     last_reload_ms: f32,
     /// Total `@group(3)` uniform bytes across the live filters (diagnostics).
@@ -102,11 +104,17 @@ pub struct Engine {
     cur_signal_hz: f32,
     /// Pending debounced config save for hot (non-rebuild) behavior edits.
     save_at: Option<Instant>,
+    total_frames: u64,
 
     /// The GPU context. Moved to the bottom of the struct to ensure it is the
     /// LAST field dropped during unwinding/destruction, avoiding Surface
     /// teardown while stack-resident SurfaceTextures are still alive.
     gpu: GpuContext,
+
+    // Output Framework
+    output_scheduler: OutputScheduler,
+    frame_dist: FrameDistributionService,
+    virtual_camera: Option<VirtualCameraSink>,
 }
 
 /// Debounce for persisting hot behavior edits (matches the reload debounce).
@@ -130,6 +138,7 @@ impl Engine {
         cam_width: u32,
         cam_height: u32,
         frame: FrameSource,
+        config: PipelineConfig,
     ) -> Self {
         let gpu = GpuContext::new(window).await;
 
@@ -175,8 +184,6 @@ impl Engine {
             )
             .expect("register face-tracking-lite behavior");
 
-        let config = load_pipeline_config();
-
         // Build the schema from the config's behaviors (publish) + filters
         // (consume), then the store + filters — all before the first frame.
         let (mut inits, skipped) =
@@ -186,6 +193,7 @@ impl Engine {
         // create their BehaviorInits directly.
         let native_inits = create_native_inits(runtime.registry(), &config);
         inits.extend(native_inits);
+        compile_behavior_handles(&mut inits, &config);
 
         let (schema, warnings) = build_schema(&inits, &config, runtime.registry())
             .expect("initial pipeline schema is invalid");
@@ -208,6 +216,16 @@ impl Engine {
         let group3_bytes = group3_bytes(&config, runtime.registry());
         let (artifact_tx, artifact_rx) = std::sync::mpsc::channel();
         let behavior = BehaviorRuntime::spawn(publisher, schema.clone(), frame, inits, Some(artifact_tx));
+
+        let mut output_scheduler = OutputScheduler::new();
+        let frame_dist = FrameDistributionService::new();
+        let mut virtual_camera = None;
+        
+        // Start Virtual Camera proof of concept (30 FPS)
+        // Ignoring permissions/errors for now since it's a stub
+        let mut vc = VirtualCameraSink::new(gpu.config.width, gpu.config.height, 30.0);
+        vc.start(&mut output_scheduler);
+        virtual_camera = Some(vc);
 
         Self {
             gpu,
@@ -233,6 +251,10 @@ impl Engine {
             cur_fps: 0.0,
             cur_signal_hz: 0.0,
             save_at: None,
+            total_frames: 0,
+            output_scheduler,
+            frame_dist,
+            virtual_camera,
         }
     }
 
@@ -263,9 +285,19 @@ impl Engine {
         &self.gpu.device
     }
 
+    /// The GPU queue.
+    pub fn queue(&self) -> &Queue {
+        &self.gpu.queue
+    }
+
     /// The swapchain texture format the UI must paint into.
     pub fn surface_format(&self) -> TextureFormat {
         self.gpu.config.format
+    }
+
+    /// Create a new surface for a secondary window.
+    pub fn create_surface(&self, window: Arc<Window>) -> Surface<'static> {
+        self.gpu.instance.create_surface(window).expect("failed to create surface")
     }
 
     /// The last reload error in plain language, if the current `config` failed
@@ -275,6 +307,29 @@ impl Engine {
     }
 
     // ---- UI-facing edit API (mutate the document, schedule a rebuild) ----
+
+    pub fn set_camera(&mut self, device_id: CameraId, mode: Option<CaptureMode>) {
+        if let Ok(val) = serde_json::to_value(device_id) {
+            if !self.config.source.config.is_object() {
+                self.config.source.config = serde_json::Value::Object(Default::default());
+            }
+            if let Some(obj) = self.config.source.config.as_object_mut() {
+                obj.insert("device_id".to_string(), val);
+                if let Some(m) = mode {
+                    obj.insert("width".to_string(), serde_json::json!(m.width));
+                    obj.insert("height".to_string(), serde_json::json!(m.height));
+                    obj.insert("fps".to_string(), serde_json::json!(m.fps));
+                    obj.insert("pixel_format".to_string(), serde_json::json!(m.pixel_format));
+                } else {
+                    obj.remove("width");
+                    obj.remove("height");
+                    obj.remove("fps");
+                    obj.remove("pixel_format");
+                }
+                self.reload.mark_dirty();
+            }
+        }
+    }
 
     /// Set one parameter on a node. Continuous edit → debounced apply.
     pub fn set_param(&mut self, instance_id: &str, key: &str, value: ParamValue) {
@@ -410,6 +465,7 @@ impl Engine {
         // Append native behavior inits.
         let native_inits = create_native_inits(self.runtime.registry(), &self.config);
         inits.extend(native_inits);
+        compile_behavior_handles(&mut inits, &self.config);
 
         let (schema, warnings) = build_schema(&inits, &self.config, self.runtime.registry())
             .map_err(|e| e.to_string())?;
@@ -516,20 +572,46 @@ impl Engine {
         camera: &WebcamCapture,
         overlay: impl FnOnce(&Device, &Queue, &TextureView, [u32; 2]),
     ) {
+        let frame_start = Instant::now();
+        self.total_frames += 1;
+        crate::runtime::CURRENT_FRAME.store(self.total_frames, std::sync::atomic::Ordering::SeqCst);
+
+        crate::trace_log!("ENGINE", "FRAME BEGIN");
+        crate::trace_log!("ENGINE", "  frame_id: {}", self.total_frames);
+        crate::trace_log!("ENGINE", "  epoch: {}", self.runtime.current_epoch().raw());
+        crate::trace_log!("ENGINE", "  compiled_plan_id: {}", self.runtime.current_plan_hash().unwrap_or(0));
+        crate::trace_log!("ENGINE", "  surface_size: {}x{}", self.gpu.config.width, self.gpu.config.height);
+        crate::trace_log!("ENGINE", "  camera_size: {}x{}", self.video.width, self.video.height);
+        crate::trace_log!("ENGINE", "  backbuffer_size: {}x{}", self.gpu.config.width, self.gpu.config.height);
+
+        crate::trace_log!("ENGINE", "Camera Upload Begin");
+
         // Stream the newest webcam frame to the GPU (the source).
-        if camera.copy_latest(&mut self.frame_buf) && !self.frame_buf.is_empty() {
-            self.video.upload(&self.gpu.queue, &self.frame_buf);
+        if let Some((cw, ch)) = camera.copy_latest(&mut self.frame_buf) {
+            if !self.frame_buf.is_empty() {
+                if cw != self.video.width || ch != self.video.height {
+                    crate::trace_log!("ENGINE", "Camera resolution changed to {}x{}, recreating VideoTexture", cw, ch);
+                    self.video = crate::engine::video::VideoTexture::new(&self.gpu.device, cw, ch);
+                    self.runtime.set_source(&self.gpu.device, &self.video.view);
+                }
+                self.video.upload(&self.gpu.queue, &self.frame_buf);
+            }
         }
+        crate::trace_log!("ENGINE", "Camera Upload End");
 
         let frame = match self.gpu.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(SurfaceError::Lost | SurfaceError::Outdated) => {
+                crate::trace_log!("WARNING", "Surface lost or outdated; reconfiguring surface");
                 self.gpu
                     .surface
                     .configure(&self.gpu.device, &self.gpu.config);
                 return; // overlay skipped this frame too; next frame re-runs the UI
             }
-            Err(_) => return,
+            Err(e) => {
+                crate::trace_log!("WARNING", "Failed to get current surface texture: {:?}", e);
+                return;
+            }
         };
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
 
@@ -537,6 +619,21 @@ impl Engine {
         self.reader.snapshot_into(&mut self.signals);
 
         let staged_artifacts: Vec<_> = self.artifact_rx.try_iter().collect();
+        let staged_artifacts_count = staged_artifacts.len();
+        for (node_h, art_h, art) in &staged_artifacts {
+            let size = art.estimated_bytes();
+            let payload_type = match art {
+                crate::runtime::artifact::RenderArtifact::Instances { .. } => "Instances",
+                crate::runtime::artifact::RenderArtifact::None => "None",
+                _ => "Unknown",
+            };
+            crate::trace_log!("CHANNEL", "CHANNEL RECEIVE");
+            crate::trace_log!("CHANNEL", "  node_handle: NodeHandle({})", node_h.raw());
+            crate::trace_log!("CHANNEL", "  artifact_handle: ArtifactHandle({})", art_h.raw());
+            crate::trace_log!("CHANNEL", "  payload: {}", payload_type);
+            crate::trace_log!("CHANNEL", "  length: {} bytes", size);
+        }
+
         let time = self.start.elapsed().as_secs_f32();
         self.runtime.render(
             &self.gpu.device,
@@ -546,6 +643,12 @@ impl Engine {
             &self.signals,
             staged_artifacts,
         ); // encoder #1 (submits)
+
+        let current_time_f64 = self.start.elapsed().as_secs_f64();
+        self.frame_dist.clear_cache();
+        if let Some(vc) = &mut self.virtual_camera {
+            vc.render(current_time_f64, self.total_frames, &mut self.output_scheduler, &mut self.frame_dist);
+        }
 
         self.log_stats();
 
@@ -557,6 +660,15 @@ impl Engine {
         ); // encoder #2 (egui), same surface frame
 
         frame.present();
+
+        let duration = frame_start.elapsed();
+        crate::trace_log!("ENGINE", "FRAME END");
+        crate::trace_log!("ENGINE", "  frame duration: {:?}", duration);
+        crate::trace_log!("ENGINE", "  node count: {}", self.runtime.graph_len());
+        crate::trace_log!("ENGINE", "  artifact count: {}", staged_artifacts_count);
+        crate::trace_log!("ENGINE", "  GPU upload count: {}", self.runtime.broker().frame_metrics().upload_count);
+        crate::trace_log!("ENGINE", "  GPU bytes uploaded: {} bytes", self.runtime.broker().frame_metrics().bytes_uploaded);
+        crate::trace_log!("ENGINE", "  present success: true");
     }
 
     /// Spike instrumentation: once per second, report FPS, rebuild count, signal
@@ -610,7 +722,7 @@ impl Engine {
 /// missing or unreadable. Structural problems in an existing file are surfaced
 /// (panic) rather than silently swallowed, since the user clearly intended to
 /// drive the pipeline from disk.
-fn load_pipeline_config() -> PipelineConfig {
+pub fn load_pipeline_config() -> PipelineConfig {
     let path = Path::new(PIPELINE_PATH);
     if path.exists() {
         match PipelineConfig::load(path) {
@@ -755,4 +867,16 @@ fn create_native_inits(
         ));
     }
     inits
+}
+
+fn compile_behavior_handles(inits: &mut [crate::behavior::BehaviorInit], config: &crate::addon::pipeline::PipelineConfig) {
+    let mut next_handle = config.pipeline.len() as u32;
+    for init in inits.iter_mut() {
+        if let Some(render_index) = config.pipeline.iter().position(|node| node.instance_id == init.instance_id) {
+            init.node_handle = crate::runtime::NodeHandle::new(render_index as u32);
+        } else {
+            init.node_handle = crate::runtime::NodeHandle::new(next_handle);
+            next_handle += 1;
+        }
+    }
 }

@@ -20,6 +20,7 @@
 
 use super::artifact::{ArtifactBudget, ArtifactValidationError, RenderArtifact};
 use super::plan::PlanEpoch;
+use super::{NodeHandle, ArtifactHandle};
 
 /// The error type returned by `HostApi::publish_artifact`.
 ///
@@ -67,6 +68,8 @@ impl std::error::Error for PublishError {}
 /// and the broker's `materialize` call within the same frame (**I012**).
 pub struct StagedArtifact {
     pub(crate) instance_id: String,
+    pub(crate) node_handle: NodeHandle,
+    pub(crate) artifact_handle: ArtifactHandle,
     pub artifact: RenderArtifact,
     epoch: PlanEpoch,
 }
@@ -169,8 +172,98 @@ impl HostApi {
         artifact: RenderArtifact,
         artifact_epoch: PlanEpoch,
     ) -> Result<(), PublishError> {
+        let node_handle = NodeHandle::new(crate::runtime::hash_str(&instance_id));
+        let art_handle = ArtifactHandle::new(crate::runtime::hash_str("instances"));
+        self.publish_artifact_v2(node_handle, art_handle, artifact, artifact_epoch)
+    }
+
+    /// Stages a validated, budget-checked artifact ready for the `ResourceBroker`
+    /// using modern NodeHandle and ArtifactHandle.
+    pub fn publish_artifact_v2(
+        &mut self,
+        node_handle: NodeHandle,
+        artifact_handle: ArtifactHandle,
+        artifact: RenderArtifact,
+        artifact_epoch: PlanEpoch,
+    ) -> Result<(), PublishError> {
+        let queue_size_before = self.staged.len();
+        let size = artifact.estimated_bytes();
+        let schema_id = match &artifact {
+            RenderArtifact::Instances { schema, .. } => schema.schema_id,
+            RenderArtifact::Geometry { vertices, .. } => vertices.schema_id,
+            RenderArtifact::Custom { schema_id, .. } => *schema_id,
+            _ => 0,
+        };
+        let vertex_count = match &artifact {
+            RenderArtifact::Geometry { vertices, .. } => vertices.rows.len(),
+            _ => 0,
+        };
+        let instance_count = match &artifact {
+            RenderArtifact::Instances { rows, .. } => rows.rows.len(),
+            _ => 0,
+        };
+
+        crate::trace_log!("HOST", "publish_artifact_v2");
+        crate::trace_log!("HOST", "  node_handle: NodeHandle({})", node_handle.raw());
+        crate::trace_log!("HOST", "  artifact_handle: ArtifactHandle({})", artifact_handle.raw());
+        crate::trace_log!("HOST", "  schema_id: {}", schema_id);
+        crate::trace_log!("HOST", "  size: {} bytes", size);
+        crate::trace_log!("HOST", "  vertex_count: {}", vertex_count);
+        crate::trace_log!("HOST", "  instance_count: {}", instance_count);
+        crate::trace_log!("HOST", "  queue size before push = {}", queue_size_before);
+
+        if let RenderArtifact::None = &artifact {
+            crate::trace_log!("WARNING", "publish_artifact_v2 received RenderArtifact::None");
+        } else if instance_count == 0 && vertex_count == 0 {
+            crate::trace_log!("WARNING", "publish_artifact_v2 received non-None artifact with 0 instances and 0 vertices");
+        }
+
+        if schema_id == 9999 {
+            if let RenderArtifact::Instances { rows, .. } = &artifact {
+                let charset = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789><_ -!:";
+                let mut reconstructed = String::new();
+                for row in &rows.rows {
+                    if row.values.len() > 1 {
+                        if let crate::runtime::SemanticValue::Vec4(uv) = &row.values[1] {
+                            let char_idx = uv[0].round() as usize;
+                            if char_idx < charset.len() {
+                                reconstructed.push(charset.chars().nth(char_idx).unwrap_or(' '));
+                            } else {
+                                reconstructed.push('?');
+                            }
+                        }
+                    }
+                }
+
+                if reconstructed.is_empty() {
+                    crate::trace_log!("ASCII", "ASCII EMPTY");
+                } else {
+                    crate::trace_log!("ASCII", "ASCII DATA");
+                    crate::trace_log!("ASCII", "  reconstructed string: '{}'", reconstructed);
+                    crate::trace_log!("ASCII", "  instance count: {}", rows.rows.len());
+                    if let Some(first) = rows.rows.first() {
+                        crate::trace_log!("ASCII", "  first instance: {:?}", first.values);
+                    }
+                    if let Some(last) = rows.rows.last() {
+                        crate::trace_log!("ASCII", "  last instance: {:?}", last.values);
+                    }
+                }
+
+                // MSDF details
+                crate::trace_log!("MSDF", "MSDF glyph count: {}", reconstructed.len());
+                crate::trace_log!("MSDF", "  atlas size: 512x512");
+                crate::trace_log!("MSDF", "  vertices: {}", reconstructed.len() * 6);
+                crate::trace_log!("MSDF", "  instances: {}", reconstructed.len());
+            }
+        }
+
         // Epoch guard — cross-epoch artifacts are forbidden (I012).
         if artifact_epoch != self.current_epoch {
+            crate::trace_log!(
+                "WARNING",
+                "Epoch mismatch: artifact_epoch = {}, current_epoch = {}",
+                artifact_epoch.raw(), self.current_epoch.raw()
+            );
             return Err(PublishError::StaleEpoch {
                 artifact_epoch,
                 current_epoch: self.current_epoch,
@@ -178,17 +271,26 @@ impl HostApi {
         }
 
         // Schema validation (§7 — synchronous, before reaching broker).
-        artifact.validate().map_err(PublishError::Validation)?;
+        if let Err(e) = artifact.validate() {
+            crate::trace_log!("WARNING", "Schema validation failed for NodeHandle({}): {:?}", node_handle.raw(), e);
+            return Err(PublishError::Validation(e));
+        }
 
         // Per-artifact budget check (I017).
-        self.budget
-            .check_artifact(&artifact)
-            .map_err(PublishError::BudgetExceeded)?;
+        if let Err(e) = self.budget.check_artifact(&artifact) {
+            crate::trace_log!("WARNING", "Budget exceeded for NodeHandle({}): {:?}", node_handle.raw(), e);
+            return Err(PublishError::BudgetExceeded(e));
+        }
 
         // Frame-total budget check (I017).
         let artifact_bytes = artifact.estimated_bytes();
         let new_total = self.accumulator.total_bytes.saturating_add(artifact_bytes);
         if new_total > self.budget.max_frame_bytes {
+            crate::trace_log!(
+                "WARNING",
+                "Frame budget exceeded: current_total_bytes = {}, artifact_bytes = {}, max_frame_bytes = {}",
+                self.accumulator.total_bytes, artifact_bytes, self.budget.max_frame_bytes
+            );
             return Err(PublishError::BudgetExceeded(
                 ArtifactValidationError::FrameBudgetExceeded {
                     bytes: new_total,
@@ -199,18 +301,27 @@ impl HostApi {
 
         self.accumulator.total_bytes = new_total;
         
-        // Last-write-wins: if this instance_id already published this frame, overwrite it.
-        if let Some(existing) = self.staged.iter_mut().find(|s| s.instance_id == instance_id) {
-            #[cfg(debug_assertions)]
-            eprintln!("[host_api] warning: multiple artifacts published for instance {}", instance_id);
+        // Last-write-wins: if this node + artifact already published this frame, overwrite it.
+        if let Some(existing) = self.staged.iter_mut().find(|s| {
+            s.node_handle == node_handle && s.artifact_handle == artifact_handle
+        }) {
+            crate::trace_log!("WARNING", "Multiple artifacts published for NodeHandle({}) ArtifactHandle({}); overwriting existing", node_handle.raw(), artifact_handle.raw());
             existing.artifact = artifact;
         } else {
             self.staged.push(StagedArtifact {
-                instance_id,
+                instance_id: format!("node-{}-artifact-{}", node_handle.raw(), artifact_handle.raw()),
+                node_handle,
+                artifact_handle,
                 artifact,
                 epoch: self.current_epoch,
             });
         }
+
+        let queue_size_after = self.staged.len();
+        println!(
+            "[HOST] publish_artifact_v2 successfully staged: node = NodeHandle({}), artifact = ArtifactHandle({}), queue size after push = {}",
+            node_handle.raw(), artifact_handle.raw(), queue_size_after
+        );
 
         Ok(())
     }

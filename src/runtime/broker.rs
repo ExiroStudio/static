@@ -48,8 +48,9 @@ use std::time::{Duration, Instant};
 use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device, Queue};
 
 use crate::runtime::artifact::{InstanceSchema, RenderArtifact, SemanticRows};
-use crate::runtime::packing::{pack_rows, LayoutPlan, PackingProfile};
+use crate::runtime::packing::{LayoutPlan, PackingProfile, pack_rows};
 use crate::runtime::plan::PlanEpoch;
+use crate::runtime::{NodeHandle, ArtifactHandle};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -75,17 +76,19 @@ const ALLOC_GRANULARITY: u64 = 4096;
 /// `schema_id` is **intentionally excluded** from the key so that schema
 /// upgrades on the same node trigger an in-place resize/repack rather than a
 /// full eviction + reallocation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BrokerKey {
-    pub plan_epoch: u64,
-    pub instance_id: String,
+    pub plan_epoch: u32,
+    pub node_handle: NodeHandle,
+    pub artifact_handle: ArtifactHandle,
 }
 
 impl BrokerKey {
-    pub fn new(epoch: PlanEpoch, instance_id: String) -> Self {
+    pub fn new(epoch: PlanEpoch, node_handle: NodeHandle, artifact_handle: ArtifactHandle) -> Self {
         Self {
-            plan_epoch: epoch.raw(),
-            instance_id,
+            plan_epoch: epoch.raw() as u32,
+            node_handle,
+            artifact_handle,
         }
     }
 }
@@ -282,6 +285,33 @@ impl ResourceBroker {
         key: BrokerKey,
         artifact: &RenderArtifact,
     ) -> Result<MaterializedHandle, MaterializeError> {
+        let res = self.materialize_internal(device, queue, key.clone(), artifact);
+        match &res {
+            Ok(handle) => {
+                crate::trace_log!(
+                    "BROKER",
+                    "Materialization successful: node = NodeHandle({}), artifact = ArtifactHandle({}), row count = {}, stride = {}",
+                    handle.key.node_handle.raw(), handle.key.artifact_handle.raw(), handle.row_count, handle.stride
+                );
+            }
+            Err(e) => {
+                crate::trace_log!(
+                    "WARNING",
+                    "Materialization failed for node NodeHandle({}) artifact ArtifactHandle({}): {:?}",
+                    key.node_handle.raw(), key.artifact_handle.raw(), e
+                );
+            }
+        }
+        res
+    }
+
+    fn materialize_internal(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        key: BrokerKey,
+        artifact: &RenderArtifact,
+    ) -> Result<MaterializedHandle, MaterializeError> {
         // ── Step 1: Validator ──────────────────────────────────────────────
         let (schema, rows) = extract_instances(artifact)?;
 
@@ -298,6 +328,11 @@ impl ResourceBroker {
 
         let row_count = rows.rows.len();
         let required_bytes = layout.buffer_size(row_count) as u64;
+        let cache_hit = self.cache.contains_key(&key);
+
+        crate::trace_log!("BROKER", "BROKER LOOKUP");
+        crate::trace_log!("BROKER", "  key: {:?}", key);
+        crate::trace_log!("BROKER", "  cache hit: {}", cache_hit);
 
         if required_bytes > self.memory_budget {
             return Err(MaterializeError::ExceedsGpuLimit {
@@ -306,7 +341,13 @@ impl ResourceBroker {
         }
 
         // ── Step 3: Allocator — ensure_buffer() ───────────────────────────
-        self.ensure_buffer(device, key.clone(), required_bytes, schema.schema_id, &layout)?;
+        self.ensure_buffer(
+            device,
+            key.clone(),
+            required_bytes,
+            schema.schema_id,
+            &layout,
+        )?;
 
         // ── Step 4: Uploader ───────────────────────────────────────────────
         {
@@ -314,8 +355,16 @@ impl ResourceBroker {
             let mut staging = vec![0u8; required_bytes as usize];
             pack_rows(&mut staging, &rows.rows, &layout);
 
+            crate::trace_log!("MATERIALIZATION", "MATERIALIZATION DETAIL");
+            crate::trace_log!("MATERIALIZATION", "  schema_id: {}", schema.schema_id);
+            crate::trace_log!("MATERIALIZATION", "  layout stride: {} bytes", layout.stride());
+            crate::trace_log!("MATERIALIZATION", "  required CPU/GPU bytes: {} bytes", required_bytes);
+            crate::trace_log!("MATERIALIZATION", "  instance count: {}", row_count);
+
+            crate::trace_log!("BROKER", "Upload Begin");
             // Upload to GPU.
             self.upload(queue, key.clone(), &staging);
+            crate::trace_log!("BROKER", "Upload End");
         }
 
         // Mark as Active so sweep() doesn't evict it.
@@ -343,15 +392,21 @@ impl ResourceBroker {
 
         for (key, res) in &mut self.cache {
             if res.state == ResourceState::Idle {
-                if now.duration_since(res.last_used) >= GRACE_WINDOW {
+                let idle_dur = now.duration_since(res.last_used);
+                if idle_dur >= GRACE_WINDOW {
                     res.state = ResourceState::Evicted;
                     to_evict.push(key.clone());
                 }
             }
         }
 
+        let evict_count = to_evict.len();
         for key in to_evict {
-            self.cache.remove(&key);
+            if let Some(res) = self.cache.remove(&key) {
+                crate::trace_log!("BROKER", "EVICT");
+                crate::trace_log!("BROKER", "  key: {:?}", key);
+                crate::trace_log!("BROKER", "  capacity: {} bytes", res.capacity);
+            }
             self.frame_metrics.eviction_count = self.frame_metrics.eviction_count.wrapping_add(1);
             self.total_metrics.eviction_count = self.total_metrics.eviction_count.wrapping_add(1);
         }
@@ -371,7 +426,13 @@ impl ResourceBroker {
     ///
     /// Returns `None` if the key is unknown or was evicted.
     pub fn get(&self, key: &BrokerKey) -> Option<&MaterializedResource> {
-        self.cache.get(key)
+        let result = self.cache.get(key);
+        if result.is_none() {
+            println!("[WARNING] [BROKER] GPU cache miss: requested key = {:?}", key);
+        } else {
+            println!("[BROKER] GPU cache hit: requested key = {:?}", key);
+        }
+        result
     }
 
     /// Number of currently cached (non-evicted) resources.
@@ -387,9 +448,11 @@ impl ResourceBroker {
     /// guarantee deterministic reuse across frames (**I013**).
     fn get_or_compile_layout(&mut self, schema: &InstanceSchema) -> LayoutPlan {
         if let Some(cached) = self.layout_cache.get(&schema.schema_id) {
+            println!("[BROKER] Layout cache HIT for schema_id = {}", schema.schema_id);
             return cached.clone();
         }
         // Cache miss — compile once.
+        println!("[BROKER] Layout cache MISS for schema_id = {}; compiling layout plan", schema.schema_id);
         let plan = LayoutPlan::compile(&schema.fields, PackingProfile::StorageStd430);
         self.layout_cache.insert(schema.schema_id, plan.clone());
         plan
@@ -415,6 +478,10 @@ impl ResourceBroker {
         // Reuse path (cache hit, capacity sufficient).
         if let Some(res) = self.cache.get_mut(&key) {
             if res.capacity >= required {
+                crate::trace_log!("BROKER", "REUSE");
+                crate::trace_log!("BROKER", "  key: {:?}", key);
+                crate::trace_log!("BROKER", "  capacity: {} bytes", res.capacity);
+
                 // Schema changed → update cached schema_id + layout (in-place
                 // reconfigure, no buffer drop — key is intentionally schema-agnostic).
                 if res.schema_id != schema_id {
@@ -428,9 +495,17 @@ impl ResourceBroker {
             }
 
             // Capacity insufficient → geometric resize.
-            let new_cap = round_up(required.max(res.capacity.saturating_mul(2)), ALLOC_GRANULARITY);
-            let buffer = create_buffer(device, new_cap)
-                .ok_or(MaterializeError::AllocationFailed)?;
+            let new_cap = round_up(
+                required.max(res.capacity.saturating_mul(2)),
+                ALLOC_GRANULARITY,
+            );
+            crate::trace_log!("BROKER", "OVERWRITE");
+            crate::trace_log!("BROKER", "  key: {:?}", key);
+            crate::trace_log!("BROKER", "  old_capacity: {} bytes", res.capacity);
+            crate::trace_log!("BROKER", "  new_capacity: {} bytes", new_cap);
+
+            let buffer =
+                create_buffer(device, new_cap).ok_or(MaterializeError::AllocationFailed)?;
 
             res.buffer = buffer;
             res.capacity = new_cap;
@@ -445,6 +520,10 @@ impl ResourceBroker {
 
         // Cache miss → first allocation.
         let cap = round_up(required.max(ALLOC_GRANULARITY), ALLOC_GRANULARITY);
+        crate::trace_log!("BROKER", "ALLOCATE");
+        crate::trace_log!("BROKER", "  key: {:?}", key);
+        crate::trace_log!("BROKER", "  capacity: {} bytes", cap);
+
         let buffer = create_buffer(device, cap).ok_or(MaterializeError::AllocationFailed)?;
 
         self.cache.insert(
@@ -528,7 +607,11 @@ fn round_up(value: u64, granularity: u64) -> u64 {
         return value;
     }
     let rem = value % granularity;
-    if rem == 0 { value } else { value + (granularity - rem) }
+    if rem == 0 {
+        value
+    } else {
+        value + (granularity - rem)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -549,9 +632,9 @@ mod tests {
         use std::collections::HashSet;
         let mut set = HashSet::new();
         let epoch = PlanEpoch(1);
-        set.insert(BrokerKey::new(epoch, "0".into()));
-        set.insert(BrokerKey::new(epoch, "1".into()));
-        set.insert(BrokerKey::new(epoch, "0".into())); // duplicate
+        set.insert(BrokerKey::new(epoch, NodeHandle::new(0), ArtifactHandle::new(0)));
+        set.insert(BrokerKey::new(epoch, NodeHandle::new(1), ArtifactHandle::new(0)));
+        set.insert(BrokerKey::new(epoch, NodeHandle::new(0), ArtifactHandle::new(0))); // duplicate
         assert_eq!(set.len(), 2, "BrokerKey hashing must deduplicate");
     }
 
@@ -567,7 +650,10 @@ mod tests {
     #[test]
     fn resource_state_initial_is_allocated() {
         // Verify the state machine starts correctly.
-        assert_eq!(ResourceState::Allocated as u8, ResourceState::Allocated as u8);
+        assert_eq!(
+            ResourceState::Allocated as u8,
+            ResourceState::Allocated as u8
+        );
     }
 
     #[test]
@@ -593,8 +679,8 @@ mod tests {
 
     #[test]
     fn broker_key_different_epochs_are_different() {
-        let k1 = BrokerKey::new(PlanEpoch(1), "0".into());
-        let k2 = BrokerKey::new(PlanEpoch(2), "0".into());
+        let k1 = BrokerKey::new(PlanEpoch(1), NodeHandle::new(0), ArtifactHandle::new(0));
+        let k2 = BrokerKey::new(PlanEpoch(2), NodeHandle::new(0), ArtifactHandle::new(0));
         assert_ne!(k1, k2, "different epochs must produce different keys");
     }
 

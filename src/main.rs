@@ -18,6 +18,7 @@ mod runner;
 mod runtime;
 mod signal;
 mod ui;
+pub mod output;
 
 #[cfg(test)]
 mod smoke;

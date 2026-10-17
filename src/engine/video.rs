@@ -7,8 +7,8 @@ use wgpu::*;
 pub struct VideoTexture {
     pub view: TextureView,
     texture: Texture,
-    width: u32,
-    height: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 impl VideoTexture {
