@@ -34,7 +34,7 @@ use crate::addon::registry::AddonRegistry;
 use crate::addon::schema::ParamValue;
 use crate::addons::{CrtAddon, DotRendererAddon};
 use crate::behavior::{
-    BehaviorHandle, BehaviorHost, BehaviorInit, BehaviorRuntime, addons, builtins,
+    BehaviorHandle, BehaviorHost, BehaviorInit, BehaviorRuntime, builtins,
 };
 use crate::behavior::native;
 use crate::camera::{CameraId, CaptureMode, FrameSource, WebcamCapture};
@@ -52,9 +52,6 @@ use crate::output::{OutputScheduler, FrameDistributionService, VirtualCameraSink
 /// Where the engine looks for the pipeline definition, relative to the working
 /// directory. Missing or invalid → the built-in default pipeline is used.
 const PIPELINE_PATH: &str = "pipeline.json";
-
-/// Directory holding installed (on-disk) addons, one subdirectory per addon id.
-const ADDONS_ROOT: &str = "addons";
 
 pub struct Engine {
     /// The webcam source: frames stream into this texture every frame.
@@ -163,12 +160,16 @@ impl Engine {
         // The webcam is the source; hand its view to the runtime.
         runtime.set_source(&gpu.device, &video.view);
 
-        // Pick up any on-disk addons installed under `addons/` (missing → no-op).
+        // Pick up any on-disk addons installed under configured roots (missing → no-op).
         // Scanned *before* behavior registration so an executable behavior can
         // bind its factory to a package discovered here (the package then owns
         // the UI param schema; the factory supplies only execution).
-        if let Err(e) = runtime.scan_addons(Path::new(ADDONS_ROOT)) {
-            eprintln!("[engine] addon scan failed: {e}");
+        let search_paths = crate::addon::registry::resolve_addon_search_paths();
+        for root in &search_paths {
+            eprintln!("[engine] scanning addons from: {root:?}");
+            if let Err(e) = runtime.scan_addons(root) {
+                eprintln!("[engine] addon scan failed for {root:?}: {e}");
+            }
         }
 
         // Register executable behaviors through the host seam — a registry
@@ -382,9 +383,16 @@ impl Engine {
         }
     }
 
+    /// Re-scan all configured addon search paths and update the runtime registry.
+    pub fn rescan_addons(&mut self) -> crate::addon::Result<()> {
+        let search_paths = crate::addon::registry::resolve_addon_search_paths();
+        self.runtime.rescan_addons_all(&search_paths)
+    }
+
     fn try_install(&mut self, zip_path: &Path) -> crate::addon::Result<String> {
-        let installed = package::install(zip_path, Path::new(ADDONS_ROOT))?;
-        self.runtime.rescan_addons(Path::new(ADDONS_ROOT))?;
+        let target_root = crate::addon::registry::primary_addons_root();
+        let installed = package::install(zip_path, &target_root)?;
+        self.rescan_addons()?;
         // Registry changed; re-validate / rebuild (pipeline itself is unchanged).
         self.reload.mark_dirty_now();
         let id = installed
@@ -408,8 +416,19 @@ impl Engine {
         self.rebuild(true)?;
 
         // Step 3: Delete files only after execution has been safely drained.
-        match package::uninstall(Path::new(ADDONS_ROOT), addon_id)
-            .and_then(|()| self.runtime.rescan_addons(Path::new(ADDONS_ROOT)))
+        let target_root = if let Some(entry) = self.runtime.registry().get(addon_id) {
+            if !entry.builtin && entry.root.exists() {
+                entry.root.parent().map(Path::to_path_buf)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let target_root = target_root.unwrap_or_else(crate::addon::registry::primary_addons_root);
+
+        match package::uninstall(&target_root, addon_id)
+            .and_then(|()| self.rescan_addons())
         {
             Ok(()) => {
                 // Mark dirty just in case, though the sync rebuild already applied changes.

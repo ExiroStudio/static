@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
+
 use super::compat::{check_compat, ENGINE_API_VERSION};
 use super::error::{AddonError, Result};
 use super::manifest::Manifest;
@@ -49,6 +51,169 @@ pub struct AddonRegistry {
     engine_api: u32,
 }
 
+/// The environment variable holding search paths for addons, separated by the OS path list separator (`:` on Unix, `;` on Windows).
+pub const ADDONS_PATH_ENV: &str = "STATIC_ADDONS_PATH";
+
+/// Alternative environment variable holding a single search path for addons.
+pub const ADDONS_DIR_ENV: &str = "STATIC_ADDONS_DIR";
+
+/// Default relative directory name for addons.
+pub const DEFAULT_ADDONS_DIR: &str = "addons";
+
+/// The default configuration file name.
+pub const STATIC_CONFIG_FILE: &str = "static.toml";
+
+/// Environment variable overriding the path to the configuration file.
+pub const STATIC_CONFIG_ENV: &str = "STATIC_CONFIG";
+
+/// Optional engine configuration loaded from `static.toml`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct StaticConfig {
+    #[serde(default)]
+    pub addons: AddonsConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AddonsConfig {
+    #[serde(default)]
+    pub search_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+}
+
+impl StaticConfig {
+    /// Attempt to find and load `static.toml`.
+    ///
+    /// Checks:
+    /// 1. Path in `STATIC_CONFIG` environment variable if set.
+    /// 2. `./static.toml` in the current working directory.
+    /// 3. `../static.toml` in the parent directory.
+    pub fn load() -> Option<(Self, PathBuf)> {
+        if let Ok(env_path) = std::env::var(STATIC_CONFIG_ENV) {
+            let p = PathBuf::from(env_path);
+            if p.is_file() {
+                if let Ok(content) = fs::read_to_string(&p) {
+                    match toml::from_str::<StaticConfig>(&content) {
+                        Ok(cfg) => return Some((cfg, p)),
+                        Err(e) => {
+                            eprintln!("[engine] warning: failed to parse {}: {e}", p.display())
+                        }
+                    }
+                }
+            }
+        }
+
+        let candidates = [
+            PathBuf::from(STATIC_CONFIG_FILE),
+            PathBuf::from(format!("../{}", STATIC_CONFIG_FILE)),
+        ];
+
+        for c in candidates {
+            if c.is_file() {
+                if let Ok(content) = fs::read_to_string(&c) {
+                    match toml::from_str::<StaticConfig>(&content) {
+                        Ok(cfg) => return Some((cfg, c)),
+                        Err(e) => {
+                            eprintln!("[engine] warning: failed to parse {}: {e}", c.display())
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+}
+
+/// Resolves addon search paths based on environment variables, `static.toml`, and defaults.
+///
+/// Priority:
+/// 1. `STATIC_ADDONS_PATH` (split via `std::env::split_paths`)
+/// 2. `STATIC_ADDONS_DIR` (single directory)
+/// 3. `static.toml` configuration file (`[addons.search_paths]` or `[addons.path]`)
+/// 4. Default fallbacks:
+///    - `addons` (in current working directory)
+///    - `../addons` (parent directory, e.g. when run from the `engine/` subfolder)
+pub fn resolve_addon_search_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    // 1. Environment variables have highest precedence
+    if let Ok(val) = std::env::var(ADDONS_PATH_ENV) {
+        for p in std::env::split_paths(&val) {
+            if !p.as_os_str().is_empty() && !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+    } else if let Ok(val) = std::env::var(ADDONS_DIR_ENV) {
+        let p = PathBuf::from(val);
+        if !p.as_os_str().is_empty() && !paths.contains(&p) {
+            paths.push(p);
+        }
+    }
+
+    // 2. Check static.toml if no environment variables were provided
+    if paths.is_empty() {
+        if let Some((cfg, config_path)) = StaticConfig::load() {
+            let base_dir = config_path
+                .canonicalize()
+                .ok()
+                .and_then(|p| p.parent().map(Path::to_path_buf))
+                .unwrap_or_else(|| {
+                    config_path
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| PathBuf::from("."))
+                });
+
+            let mut toml_paths = cfg.addons.search_paths;
+            if let Some(single) = cfg.addons.path {
+                toml_paths.push(single);
+            }
+
+            for p in toml_paths {
+                let resolved = if p.is_relative() {
+                    base_dir.join(&p)
+                } else {
+                    p
+                };
+                if !paths.contains(&resolved) {
+                    paths.push(resolved);
+                }
+            }
+        }
+    }
+
+    // 3. Fallback if neither env vars nor static.toml provided paths
+    if paths.is_empty() {
+        let candidates = [
+            PathBuf::from(DEFAULT_ADDONS_DIR),
+            PathBuf::from(format!("../{}", DEFAULT_ADDONS_DIR)),
+        ];
+        for c in candidates {
+            if c.is_dir() && !paths.contains(&c) {
+                paths.push(c);
+            }
+        }
+        // If neither candidate directory exists on disk, keep the default "addons"
+        // so missing-directory error handling behaves consistently with v1.
+        if paths.is_empty() {
+            paths.push(PathBuf::from(DEFAULT_ADDONS_DIR));
+        }
+    }
+
+    paths
+}
+
+/// Returns the primary root directory where new addons should be installed.
+///
+/// Returns the first search path resolved by [`resolve_addon_search_paths`].
+pub fn primary_addons_root() -> PathBuf {
+    resolve_addon_search_paths()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_ADDONS_DIR))
+}
+
 impl AddonRegistry {
     pub fn new() -> Self {
         Self::with_engine_api(ENGINE_API_VERSION)
@@ -61,6 +226,14 @@ impl AddonRegistry {
             rejected: Vec::new(),
             engine_api,
         }
+    }
+
+    /// Scan multiple root directories for addons in order.
+    pub fn scan_all<P: AsRef<Path>>(&mut self, roots: impl IntoIterator<Item = P>) -> Result<()> {
+        for root in roots {
+            self.scan(root.as_ref())?;
+        }
+        Ok(())
     }
 
     /// Scan `root` for addons. Each direct subdirectory is treated as a
@@ -275,4 +448,70 @@ kind = "pipeline"
 
         fs::remove_dir_all(&root).ok();
     }
+
+    #[test]
+    fn scan_all_loads_from_multiple_roots() {
+        let root1 = tempdir();
+        let root2 = tempdir();
+        write_manifest(&root1.join("addon1"), &good_manifest("io.test.addon1", 1, 1));
+        write_manifest(&root2.join("addon2"), &good_manifest("io.test.addon2", 1, 1));
+
+        let mut reg = AddonRegistry::new();
+        reg.scan_all(&[root1.as_path(), root2.as_path()]).unwrap();
+        assert_eq!(reg.len(), 2);
+        assert!(reg.contains("io.test.addon1"));
+        assert!(reg.contains("io.test.addon2"));
+
+        fs::remove_dir_all(&root1).ok();
+        fs::remove_dir_all(&root2).ok();
+    }
+
+    #[test]
+    fn resolve_search_paths_reads_env_dir() {
+        let root = tempdir();
+        // Set STATIC_ADDONS_DIR
+        unsafe {
+            std::env::set_var(ADDONS_DIR_ENV, root.to_str().unwrap());
+        }
+        let paths = resolve_addon_search_paths();
+        assert!(paths.contains(&root));
+        unsafe {
+            std::env::remove_var(ADDONS_DIR_ENV);
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_search_paths_reads_static_toml() {
+        let dir = tempdir();
+        let config_path = dir.join("static.toml");
+        let custom_addons = dir.join("my_addons");
+        fs::create_dir_all(&custom_addons).unwrap();
+
+        let toml_content = format!(
+            r#"[addons]
+search_paths = ["my_addons"]
+"#
+        );
+        fs::write(&config_path, toml_content).unwrap();
+
+        unsafe {
+            std::env::set_var(STATIC_CONFIG_ENV, config_path.to_str().unwrap());
+        }
+
+        let paths = resolve_addon_search_paths();
+        assert!(
+            paths.iter().any(|p| p.ends_with("my_addons")),
+            "paths {paths:?} should include my_addons from static.toml"
+        );
+
+        unsafe {
+            std::env::remove_var(STATIC_CONFIG_ENV);
+        }
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }
+
+

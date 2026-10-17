@@ -239,10 +239,27 @@ impl PipelineRuntime {
         self.registry.scan(root)
     }
 
+    /// Scan multiple directories for on-disk addons.
+    pub fn scan_addons_all<P: AsRef<Path>>(
+        &mut self,
+        roots: impl IntoIterator<Item = P>,
+    ) -> Result<()> {
+        self.registry.scan_all(roots)
+    }
+
     /// Rebuild the registry from scratch after an install/uninstall: re-register
     /// the builtins, then rescan the addons directory. The live node list is
     /// untouched (a separate `build` applies any resulting changes).
     pub fn rescan_addons(&mut self, root: &Path) -> Result<()> {
+        self.rescan_addons_all([root])
+    }
+
+    /// Rebuild the registry from scratch after an install/uninstall: re-register
+    /// the builtins, then rescan multiple addon directories.
+    pub fn rescan_addons_all<P: AsRef<Path>>(
+        &mut self,
+        roots: impl IntoIterator<Item = P>,
+    ) -> Result<()> {
         self.registry.clear();
         for manifest in &self.builtin_manifests {
             self.registry.register_builtin(manifest.clone())?;
@@ -250,7 +267,7 @@ impl PipelineRuntime {
         for manifest in &self.behavior_manifests {
             self.registry.register_builtin(manifest.clone())?;
         }
-        self.registry.scan(root)
+        self.registry.scan_all(roots)
     }
 
     /// Whether the runtime has a factory able to instantiate `addon_id`. An
